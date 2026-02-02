@@ -23,7 +23,7 @@ def init_serial(is_testing, environment):
             return "SUCCESS"
         else:
             return "FAIL"
-    except Exception, e:
+    except Exception as e:
         return "[EXCEPTION] " + str(e)
 
 
@@ -36,7 +36,7 @@ def init_obd(connection_id):
             return "SUCCESS"
         else:
             return "FAIL"
-    except Exception, e:
+    except Exception as e:
         return "[EXCEPTION] " + str(e)
 
 
@@ -46,7 +46,7 @@ def get_obd_response(obd_command):
     try:
         obd_response = str(obd_man.generate_obd_response(obd_command))
         return obd_response
-    except Exception, e:
+    except Exception as e:
         return "[EXCEPTION] " + str(e)
 
 

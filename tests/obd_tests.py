@@ -22,7 +22,7 @@ def create_new_obd_manager_test():
         else:
             error_item = ['create_new_obd_manager_test', 'Could not create ObdManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_obd_manager_test', str(e)]
         error_list.append(error_item)
 
@@ -38,7 +38,7 @@ def create_new_obd_manager_init_obd_connection_test():
         else:
             error_item = ['create_new_obd_manager_init_obd_connection_test', 'Could not create ObdManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_obd_manager_init_obd_connection_test', str(e)]
         error_list.append(error_item)
 

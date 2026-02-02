@@ -22,7 +22,7 @@ def create_new_oled_manager_test():
         else:
             error_item = ['create_new_oled_manager_test', 'Could not create OledManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_oled_manager_test', str(e)]
         error_list.append(error_item)
 

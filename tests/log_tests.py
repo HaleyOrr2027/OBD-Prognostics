@@ -22,7 +22,7 @@ def create_new_log_manager_test():
         else:
             error_item = ['create_new_log_manager_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_test', str(e)]
         error_list.append(error_item)
 
@@ -37,7 +37,7 @@ def create_new_log_manager_add_info_entry_test():
         else:
             error_item = ['create_new_log_manager_add_info_entry_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_add_info_entry_test', str(e)]
         error_list.append(error_item)
 
@@ -52,7 +52,7 @@ def create_new_log_manager_add_debug_entry_test():
         else:
             error_item = ['create_new_log_manager_add_debug_entry_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_add_debug_entry_test', str(e)]
         error_list.append(error_item)
 
@@ -67,7 +67,7 @@ def create_new_log_manager_add_warning_entry_test():
         else:
             error_item = ['create_new_log_manager_add_warning_entry_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_add_warning_entry_test', str(e)]
         error_list.append(error_item)
 
@@ -82,7 +82,7 @@ def create_new_log_manager_get_log_count_test():
         else:
             error_item = ['create_new_log_manager_get_log_count_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_get_log_count_test', str(e)]
         error_item.append(error_item)
 
@@ -97,7 +97,7 @@ def create_new_log_manager_get_oldest_log_file_name_test():
         else:
             error_item = ['create_new_log_manager_get_oldest_log_file_name_test', 'Could not create LogManager object']
             error_list.append(error_item)
-    except Exception, e:
+    except Exception as e:
         error_item = ['create_new_log_manager_get_oldest_log_file_name_test', str(e)]
         error_item.append(error_item)
 
