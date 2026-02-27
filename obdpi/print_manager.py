@@ -1,7 +1,7 @@
 class PrintManager:
 
     def print_message(self, message):
-        print message
+        print(message)
 
     def print_event_decorator(self, event_name):
         def decorator(func):

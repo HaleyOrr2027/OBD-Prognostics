@@ -1,4 +1,8 @@
-#!/usr/bin/python
+# OBD PROH IS NOT USIN THIS FILE - LEFT OVER FROM REPO CLONE. NOT OURS!
+# - Haley Orr 2/19/25
+# 
+# 
+# !/usr/bin/python
 #
 # HD44780 LCD/OLED Test Script for
 # Raspberry Pi

@@ -1,3 +1,9 @@
+# This class chooses and stores the serial port name to 
+# use, depending on testing mode and OS.
+
+#Testing mode allows us to run code without plugging hardware in. 
+# This way, we can simulate data.
+
 class SerialManager:
 
     def __init__(self):

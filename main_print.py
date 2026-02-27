@@ -2,6 +2,9 @@
 import atexit
 import sys
 from time import sleep
+import json
+from datetime import datetime
+
 
 import obdpi.shared_settings
 from obdpi.log_manager import LogManager
@@ -14,7 +17,9 @@ print_man = PrintManager()
 ser_man = SerialManager()
 obd_man = ObdManager()
 
+FEATURES = ["RPM", "SPEED", "COOLANT_TEMP", "VOLTAGE", "DTC", "BOOST"]
 
+# Tries to set up a serial connection and returns if it works. 
 @print_man.print_event_decorator("Initialize Serial Connection")
 @log_man.log_event_decorator("Initialize Serial Connection", "INFO")
 def init_serial(is_testing, environment):
@@ -42,13 +47,19 @@ def init_obd(connection_id):
 
 
 @print_man.print_event_decorator("")
-@log_man.log_event_decorator("OBD Response", "INFO")
 def get_obd_response(obd_command):
     try:
         obd_response = str(obd_man.generate_obd_response(obd_command))
         return obd_response
     except Exception as e:
         return "[EXCEPTION] " + str(e)
+    
+
+def get_snapshot(commands):
+    snap = {"timestamp": datetime.now().isoformat()}
+    for cmd in commands:
+        snap[cmd] = get_obd_response(cmd)
+    return snap
 
 
 def start(obd_command):
@@ -57,9 +68,15 @@ def start(obd_command):
             if init_obd(ser_man.connection_id) == "SUCCESS":
                 break
         sleep(1.0)
+
     while True:
-        obd_response = get_obd_response(obd_command)
-        sleep(0.15)
+        snap = get_snapshot(FEATURES)
+
+        # One JSON object per second (best for later matching/parsing)
+        log_man.add_info_entry_to_log(json.dumps(snap))
+        print(json.dumps(snap))
+
+        sleep(1.0)
 
 
 @print_man.print_event_decorator("Ending Script")
