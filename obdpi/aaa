@@ -1,0 +1,39 @@
+import serial
+import time
+
+ports = ["COM6", "COM12", "COM14"]
+baud_rates = [38400, 9600, 115200]
+
+for port in ports:
+    for baud in baud_rates:
+        print(f"\nTrying {port} at {baud} baud...")
+        try:
+            print("About to open serial port...")
+            ser = serial.Serial(port=port, baudrate=baud, timeout=2, write_timeout=2)
+            print("Port opened.")
+            
+            time.sleep(1)
+
+            print("Sending ATZ...")
+            ser.write(b"ATZ\r")
+            time.sleep(1)
+            response = ser.read_all().decode(errors="ignore")
+            print("ATZ response:", repr(response))
+
+            print("Sending ATI...")
+            ser.write(b"ATI\r")
+            time.sleep(1)
+            response = ser.read_all().decode(errors="ignore")
+            print("ATI response:", repr(response))
+
+            print("Sending 0100...")
+            ser.write(b"0100\r")
+            time.sleep(1)
+            response = ser.read_all().decode(errors="ignore")
+            print("0100 response:", repr(response))
+
+            ser.close()
+            print("Port closed.")
+
+        except Exception as e:
+            print("Error:", e)
