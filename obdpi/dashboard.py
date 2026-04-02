@@ -11,9 +11,9 @@ class ObdDashboard:
         # comment this for nonfullscreen on Pi
         self.root.attributes("-fullscreen", True)
 
-        self.manager = ObdManager()
+        self.manager = ObdManager(demo_mode=True) #CHANGE WHEN RUNNING FOR FR
         self.port = "/dev/rfcomm0"   # change if needed
-        self.try_connect()
+        # self.try_connect()
 
 
         # Colors
@@ -163,50 +163,62 @@ class ObdDashboard:
                 connected = False
 
         if connected:
-            self.status_label.config(text="CONNECTED", fg=self.good)
-            self.connection_card.config(text="CONNECTED", fg=self.good)
+            if self.manager.demo_mode:
+                self.status_label.config(text="DEMO MODE", fg=self.good)
+                self.connection_card.config(text="DEMO MODE", fg=self.good)
 
-            speed = self.get_response("SPEED")
-            rpm = self.get_response("RPM")
-            boost = self.get_response("BOOST")
-            temp = self.get_response("COOLANT_TEMP")
-            voltage = self.get_response("VOLTAGE")
-            dtc = self.get_response("DTC")
+                self.speed_value.config(text="DEMO")
+                self.rpm_card.config(text="DEMO", fg=self.text)
+                self.boost_card.config(text="DEMO", fg=self.text)
+                self.temp_card.config(text="DEMO", fg=self.warn)
+                self.voltage_card.config(text="DEMO", fg=self.good)
+                self.dtc_card.config(text="DEMO", fg=self.good)
 
-            speed_num = self.parse_numeric(speed)
-            rpm_num = self.parse_numeric(rpm)
-            boost_num = self.parse_numeric(boost)
-            temp_num = self.parse_numeric(temp)
-            voltage_num = self.parse_numeric(voltage)
+            else:
+                self.status_label.config(text="CONNECTED", fg=self.good)
+                self.connection_card.config(text="CONNECTED", fg=self.good)
 
-            self.speed_value.config(text=str(int(speed_num)) if speed_num is not None else "--")
-            self.rpm_card.config(text=str(int(rpm_num)) if rpm_num is not None else "--")
-            self.boost_card.config(text=f"{boost_num:.1f}" if boost_num is not None else "--")
+                speed = self.get_response("SPEED")
+                rpm = self.get_response("RPM")
+                boost = self.get_response("BOOST")
+                temp = self.get_response("COOLANT_TEMP")
+                voltage = self.get_response("VOLTAGE")
+                dtc = self.get_response("DTC")
 
-            if temp_num is not None:
-                if temp_num < 95:
-                    self.temp_card.config(text=f"{temp_num:.0f}", fg=self.good)
-                elif temp_num < 110:
-                    self.temp_card.config(text=f"{temp_num:.0f}", fg=self.warn)
+                speed_num = self.parse_numeric(speed)
+                rpm_num = self.parse_numeric(rpm)
+                boost_num = self.parse_numeric(boost)
+                temp_num = self.parse_numeric(temp)
+                voltage_num = self.parse_numeric(voltage)
+
+                self.speed_value.config(text=str(int(speed_num)) if speed_num is not None else "--")
+                self.rpm_card.config(text=str(int(rpm_num)) if rpm_num is not None else "--")
+                self.boost_card.config(text=f"{boost_num:.1f}" if boost_num is not None else "--")
+
+                if temp_num is not None:
+                    if temp_num < 95:
+                        self.temp_card.config(text=f"{temp_num:.0f}", fg=self.good)
+                    elif temp_num < 110:
+                        self.temp_card.config(text=f"{temp_num:.0f}", fg=self.warn)
+                    else:
+                        self.temp_card.config(text=f"{temp_num:.0f}", fg=self.bad)
                 else:
-                    self.temp_card.config(text=f"{temp_num:.0f}", fg=self.bad)
-            else:
-                self.temp_card.config(text="--", fg=self.text)
+                    self.temp_card.config(text="--", fg=self.text)
 
-            if voltage_num is not None:
-                if voltage_num >= 12.4:
-                    self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.good)
-                elif voltage_num >= 12.0:
-                    self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.warn)
+                if voltage_num is not None:
+                    if voltage_num >= 12.4:
+                        self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.good)
+                    elif voltage_num >= 12.0:
+                        self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.warn)
+                    else:
+                        self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.bad)
                 else:
-                    self.voltage_card.config(text=f"{voltage_num:.1f}", fg=self.bad)
-            else:
-                self.voltage_card.config(text="--", fg=self.text)
+                    self.voltage_card.config(text="--", fg=self.text)
 
-            if str(dtc).strip() == "[]":
-                self.dtc_card.config(text="NONE", fg=self.good)
-            else:
-                self.dtc_card.config(text=str(dtc), fg=self.warn)
+                if str(dtc).strip() == "[]":
+                    self.dtc_card.config(text="NONE", fg=self.good)
+                else:
+                    self.dtc_card.config(text=str(dtc), fg=self.warn)
 
         else:
             self.status_label.config(text="NO CONNECTION", fg=self.bad)
@@ -222,4 +234,5 @@ class ObdDashboard:
 
 root = tk.Tk()
 app = ObdDashboard(root)
+root.bind("<Escape>", lambda event: root.destroy())
 root.mainloop()
