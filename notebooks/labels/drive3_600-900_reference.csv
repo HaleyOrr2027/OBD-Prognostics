@@ -1,0 +1,33 @@
+start_s,end_s,label,note
+600,614,decel,38 to 10 coast then brake toward a stop
+615,620,accel,10 to 27 pull away
+621,622,steady,brief plateau ~26
+623,634,accel,27 to 41
+635,647,decel,41 to 13.5
+648,656,accel,14 to 40
+657,658,steady,holding ~40
+659,663,decel,40 to 32
+664,671,steady,drifting 30 to 34
+672,674,accel,34 to 39
+675,683,decel,39 to 27
+684,687,accel,28 to 36.5
+688,696,decel,35 to 26
+697,700,steady,27 to 29
+701,709,accel,28 to 42
+710,719,steady,cruise 45 to 50
+720,741,steady,holding 47-49
+742,747,decel,45.5 to 42
+748,756,decel,23 to 0 braking to a stop
+757,781,idle,stopped ~25s
+782,795,accel,0 to 50
+796,799,steady,holding ~51-52
+800,806,decel,52 to 44
+807,813,accel,43 to 48.5
+814,821,steady,cruise 50 to 53
+822,834,steady,holding 49-52
+835,843,steady,gentle climb 50 to 54
+844,854,steady,easing off peak holding ~50-54
+855,863,accel,55 to 60.5
+864,868,steady,holding ~62
+869,884,steady,holding 58-62
+885,900,steady,gentle drift 58 to 56
