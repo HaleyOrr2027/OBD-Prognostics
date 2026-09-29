@@ -1,0 +1,8 @@
+# Fill/tune this during Steps 15-29 of plan.md.
+version: 1
+engine_state: {}
+thermal_state: {}
+motion_state: {}
+load_state: {}
+persistence: {}
+confidence: {}
