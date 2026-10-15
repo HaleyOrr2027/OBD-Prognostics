@@ -27,3 +27,20 @@ On the Raspberry Pi, use `requirements-pi.txt` in addition to the normal require
 ## First task
 
 Do **not** start by training an autoencoder. Begin at Step 00 in `plan.md`.
+
+## Mode detector v1 (Steps 12–25 in progress)
+
+The operating-mode detector is implemented. It labels every sample of a drive with what the car was doing: idle, accelerating, cruising, coasting deceleration, strong deceleration, startup, or engine off.
+
+```bash
+python scripts/fetch_carobd.py                  # download the public carOBD drives into data/raw/carOBD/
+python training/02_label_modes.py               # writes data/labeled/<session>.csv, one row per sample
+python training/03_build_mode_inventory.py      # how much data exists per mode
+python scripts/score_modes.py drive3 data/reference_labels/drive3_600-900.csv   # accuracy vs hand labels
+python scripts/plot_mode_review.py drive3 --start 600 --end 900 --reference data/reference_labels/drive3_600-900.csv
+python -m pytest tests/unit
+```
+
+See `docs/mode_taxonomy.md` for state definitions and threshold choices, and `docs/validation_protocol.md` for how accuracy is measured and the current results.
+
+Steps 01, 02, 03, 06, 07, 09 and 10 are implemented only as far as the mode detector needs them. Step 08 (unit conversion) is a pass-through because carOBD already uses the canonical units.
