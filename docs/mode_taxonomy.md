@@ -54,24 +54,56 @@ Both use only current and past samples, so the live Pi and offline replay give i
 
 Tuning used **drive12 seconds 1480–1780 only**. drive3 seconds 600–900 is the held-out check (see `docs/validation_protocol.md`).
 
-## Open decision: persistence vs. accuracy
+## Window policy (Step 30)
 
-carOBD reports speed in whole km/h, roughly once per second, and real speed-ups and slow-downs in these drives last only 3–5 s. A dwell time suppresses flicker, but it also swallows short real events. Results across all 13 `drive*` sessions:
+Policy: `config/windows.yaml`. Evidence: `python scripts/window_policy_report.py` (about 1 minute), which labels all 129 carOBD sessions, cuts windows, and writes `outputs/evaluation/window_policy_report.csv` and `window_policy_decision.csv`.
 
-| `dwell_sec` | Median moving-segment length | Moving segments ≥ 5 s | drive12 exact / ±2 s | drive3 exact / ±2 s |
+### Sampling rate sets the floor
+
+carOBD logs about 2 rows per second, but its clock (`ENGINE_RUN_TIME`) only advances about every 2 s. The median gap between distinct timestamps is 2.0 s in every dataset group (drive, idle, live, long, ufpe). A window therefore needs about 6 s to contain 3 distinct readings, the minimum for mean, standard deviation, and slope features. This is a partial Step 11 measurement, and the Pi's real rate may be different.
+
+### Rules for every mode
+
+| Setting | Value | Why |
+|---|---|---|
+| `min_distinct_times` | 3 | Fewest readings that support mean, standard deviation, and slope |
+| `max_internal_gap_sec` | 3.0 | 1.5x the normal 2 s spacing; also checked at the window edges, so a window with data missing at its start or end is rejected |
+| `discard_partial_final` | true | A window that would run past the end of its segment is dropped, never padded |
+| `min_mode_confidence` | 0.5 | Matches `confidence.min_for_scoring` in modes.yaml |
+| Stride | Fixed grid from each segment's start | Makes WINDOW_IDs deterministic |
+
+### Per-mode lengths
+
+Segment durations are measured across all 129 sessions. They are shown at `dwell_sec` 0 (current) and 1.
+
+| Mode | Segment median / p75 / p90 (dwell 0) | Same at dwell 1 | Window / stride | Why |
 |---|---|---|---|---|
-| 0.0 (current) | 0.0 s | 14% | 79.7% / 98.0% | 68.8% / 95.0% |
-| 1.0 | 5.0 s | 53% | 66.0% / 83.3% | 64.1% / 79.4% |
-| 2.0 | 5.0 s | 59% | 65.0% / 81.0% | 62.8% / 77.1% |
-| 3.0 | 9.0 s | 74% | 56.0% / 67.0% | 61.5% / 69.4% |
+| IDLE | 11 / 29 / 69 s | 16 / 34 / 76 s | 20 / 10 s | Idle is stable, so a longer window gives about 10 readings. It sits between the median and p75. |
+| CRUISING | 0 / 2 / 6 s | 6 / 13 / 22 s | 8 / 4 s | 4 readings; between the median and p75 at dwell 1 |
+| ACCELERATING | 0 / 3 / 7 s | 6 / 11 / 15 s | 6 / 2 s | Event-sized; the shortest length that holds 3 readings |
+| COASTING_DECEL | 0 / 2 / 6 s | 4 / 8 / 12 s | 6 / 2 s | Same reasoning as ACCELERATING |
+| STRONG_DECEL | 0 / 0 / 2 s | 0 / 2 / 4 s | 4 / 2 s | **Unsupported in v1.** Hard stops last only a few seconds, giving 0 windows at dwell 0 and 20 windows from 16 sessions at dwell 1. That fails the plan.md Section 6 data gates. |
 
-The dwell value was chosen on drive12 before these drive3 numbers were computed. The drive3 column is here for the team decision only.
+## Decision for Haley and Rijul: hold time (`dwell_sec`)
 
-The Step 30 window policy needs to settle this. Pure-mode windows need segments long enough to fill a window. Options:
+A hold time stops modes from flickering, but it also swallows the short, real speed-ups and slow-downs these drives are full of. The report puts both sides in one table:
 
-1. Raise `dwell_sec` and accept the lower accuracy.
-2. Keep accurate per-sample labels and let windows take the majority mode.
-3. Re-check once Step 11 measures the real Pi sampling rate, which may differ from carOBD.
+| `dwell_sec` | IDLE | CRUISING | ACCELERATING | COASTING_DECEL | STRONG_DECEL | drive12 exact / ±2 s | drive3 exact / ±2 s |
+|---|---|---|---|---|---|---|---|
+| 0 (current) | 3891 (107) | 619 (78) | 1948 (82) | 1511 (81) | 0 (0) | 79.7% / 98.0% | 68.8% / 95.0% |
+| 1 | 3915 (109) | 4414 (82) | 3743 (82) | 2774 (82) | 20 (16) | 66.0% / 83.3% | 64.1% / 79.4% |
+| 2 | 3915 (109) | 5163 (82) | 3680 (82) | 2772 (82) | 20 (16) | 65.0% / 81.0% | 62.8% / 77.1% |
+| 3 | 4016 (110) | 6013 (82) | 4945 (82) | 3705 (82) | 34 (25) | 56.0% / 67.0% | 61.5% / 69.4% |
+
+Cells are accepted windows, with the number of independent sessions in brackets. Windows overlap, so the session count is the better measure of how much independent data there is. The dwell value was chosen on drive12 before any drive3 numbers existed; the drive3 column is shown for this decision only.
+
+What the table shows:
+
+- **Every supported mode has data from 78–82 sessions at any hold time.** With event-sized windows, Step 30 does not force a hold time.
+- **A 1 s hold mainly helps CRUISING:** 619 → 4414 windows, while ACCELERATING and COASTING_DECEL roughly double. It costs 4.7 points of exact accuracy on drive3 and 15.6 points within ±2 s.
+- **Holds longer than 1 s add little data** and keep lowering accuracy.
+
+**Proposed:** keep `dwell_sec: 0` for v1. Revisit if the Step 36 session split leaves CRUISING calibration or test sets too thin (about 619 windows across 78 sessions), or once the Pi's own sampling rate is measured.
 
 Threshold hysteresis (a lower exit threshold than entry) was also tried. It cut flicker from 12 to 10 changes per minute at a 1-point accuracy cost, so it was not adopted.
 
