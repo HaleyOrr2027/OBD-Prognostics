@@ -3,3 +3,13 @@ docs/site/
 logs/
 .vscode/
 .idea/
+__pycache__/
+.pytest_cache/
+
+# Raw data is fetched, not committed (scripts/fetch_carobd.py); generated data is reproducible.
+data/raw/
+data/labeled/
+data/inventory/
+outputs/plots/*.png
+!outputs/plots/mode_review_drive3_600-900.png
+!outputs/plots/mode_review_drive12_1480-1780.png

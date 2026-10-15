@@ -1,6 +1,59 @@
-# Fill this in during Step 03 of plan.md.
+# Step 03: PID registry. Canonical names are the only names downstream code uses.
+# Aliases map historical CSV headers (after lowercasing and replacing punctuation
+# with underscores) onto canonical names. Units are the canonical target units.
 version: 1
-required: []
-recommended: []
-optional: []
-pids: {}
+
+required: [ENGINE_RPM, VEHICLE_SPEED]
+recommended: [ENGINE_LOAD, THROTTLE_POSITION, COOLANT_TEMPERATURE]
+optional:
+  - INTAKE_PRESSURE
+  - INTAKE_TEMPERATURE
+  - SHORT_FUEL_TRIM_1
+  - LONG_FUEL_TRIM_1
+  - ENGINE_RUN_TIME
+
+pids:
+  ENGINE_RPM:
+    obd_command: RPM
+    unit: rpm
+    aliases: [engine_rpm, rpm]
+  VEHICLE_SPEED:
+    obd_command: SPEED
+    unit: km/h
+    aliases: [vehicle_speed, speed]
+  ENGINE_LOAD:
+    obd_command: ENGINE_LOAD
+    unit: percent
+    aliases: [engine_load, calculated_load]
+  THROTTLE_POSITION:
+    # Relative throttle reads 0 on a closed pedal. The carOBD absolute THROTTLE
+    # column has a floor near 15.7 percent and never reaches 0, so it is kept as
+    # a pass-through column rather than used for closed-throttle decisions.
+    obd_command: RELATIVE_THROTTLE_POS
+    unit: percent
+    aliases: [relative_throttle_position, relative_throttle_pos, throttle_position]
+  COOLANT_TEMPERATURE:
+    obd_command: COOLANT_TEMP
+    unit: degC
+    aliases: [coolant_temperature, coolant_temp]
+  INTAKE_PRESSURE:
+    obd_command: INTAKE_PRESSURE
+    unit: kPa
+    aliases: [intake_manifold_pressure, intake_pressure]
+  INTAKE_TEMPERATURE:
+    obd_command: INTAKE_TEMP
+    unit: degC
+    aliases: [intake_air_temp, intake_temp, intake_temperature]
+  SHORT_FUEL_TRIM_1:
+    obd_command: SHORT_FUEL_TRIM_1
+    unit: percent
+    aliases: [short_term_fuel_trim_bank_1, short_fuel_trim_1]
+  LONG_FUEL_TRIM_1:
+    obd_command: LONG_FUEL_TRIM_1
+    unit: percent
+    aliases: [long_term_fuel_trim_bank_1, long_fuel_trim_1]
+  ENGINE_RUN_TIME:
+    # carOBD spells this header ENGINE_RUN_TINE.
+    obd_command: RUN_TIME
+    unit: s
+    aliases: [engine_run_time, engine_run_tine, run_time]
