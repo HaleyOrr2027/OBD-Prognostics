@@ -1,8 +1,43 @@
-# Fill/tune this during Steps 15-29 of plan.md.
+# Steps 15-29: mode detector v1 configuration.
+# Tuned on drive12 (carOBD) seconds 1480-1780 only. drive3 seconds 600-900 is
+# held out and was scored once after tuning. See docs/mode_taxonomy.md.
 version: 1
-engine_state: {}
-thermal_state: {}
-motion_state: {}
-load_state: {}
-persistence: {}
-confidence: {}
+
+timebase:
+  # Gaps longer than this break derivatives and mode segments.
+  max_gap_sec: 5.0
+
+derived:
+  # Trailing (causal) filters, so offline replay and the live Pi agree.
+  speed_smooth_sec: 1.0
+  accel_span_sec: 2.0
+
+engine_state:
+  running_rpm_min: 300.0
+
+thermal_state:
+  # Conservative time-based guard. Coolant is recorded as context only.
+  startup_guard_sec: 30.0
+
+motion_state:
+  stopped_speed_kmh: 2.0
+  idle_rpm_max: 1300.0
+  accel_mps2: 0.15
+  decel_mps2: -0.15
+  strong_decel_mps2: -1.2
+
+load_state:
+  low_max_pct: 30.0
+  high_min_pct: 70.0
+
+persistence:
+  # A new motion state must hold this long before the stable state switches.
+  # 0 = off. On carOBD drives, real accel/decel bursts last 3-5 s and any dwell
+  # of 1 s or more cut drive12 agreement from 80% to 66% and added 2 s of lag.
+  # Revisit once real Pi sampling rates are measured (Step 11).
+  dwell_sec: 0.0
+
+confidence:
+  # Samples whose acceleration is within this margin of a threshold lose confidence.
+  boundary_margin_mps2: 0.05
+  min_for_scoring: 0.5
