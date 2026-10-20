@@ -1,43 +1,164 @@
-# Data Dictionary
 
-Fill this document while completing Steps 02-09 in plan.md.
+# OBD Data Dictionary
 
-Document every canonical field, type, unit, nullable status, source, and meaning.
+This file explains the variables used in 'schemas.py'.
 
-## Canonical PIDs (config/pids.yaml)
+---
 
-| Field | Unit | Required | Notes |
-|---|---|---|---|
-| ENGINE_RPM | rpm | yes | |
-| VEHICLE_SPEED | km/h | yes | carOBD reports whole km/h |
-| ENGINE_LOAD | % | recommended | |
-| THROTTLE_POSITION | % | recommended | Relative throttle; reads 0 on a closed pedal. carOBD's absolute `THROTTLE` never drops below ~15.7% and is passed through as `RAW_THROTTLE`. |
-| COOLANT_TEMPERATURE | °C | recommended | |
-| INTAKE_PRESSURE | kPa | optional | |
-| INTAKE_TEMPERATURE | °C | optional | |
-| SHORT_FUEL_TRIM_1, LONG_FUEL_TRIM_1 | % | optional | |
-| ENGINE_RUN_TIME | s | optional | carOBD header is misspelled `ENGINE_RUN_TINE`; used as the clock when `MONOTONIC_SEC` is absent |
+## 1. OBDSample
+**Raw data collected from the OBD reader or CSV files.**
 
-Unrecognized raw columns are kept with a `RAW_` prefix so they are never used as model features by accident.
+### Collection Info
+- 'SESSION_ID' (str) - ID for the driving session
+- 'TIMESTAMP_UTC' (datetime) - Date and time of the reading
+- 'MONOTONIC_SEC' (float) - Clock time used to measure intervals, in seconds
+- 'VEHICLE_ID' (str) - Vehicle ID
+- 'SOURCE' (str) - CSV or Bluetooth
+- 'CONNECTION_OK' (bool) - Whether the connection is working
 
-## Columns added by preprocessing
+### Engine Readings
+- 'ENGINE_RPM' - Engine speed (RPM)
+- 'ENGINE_LOAD' - Engine load (%)
+- 'THROTTLE_POSITION' - Throttle position (%)
+- 'ENGINE_RUN_TIME' - Time since startup (source units)
 
-| Field | Type | Meaning |
-|---|---|---|
-| ELAPSED_SEC | float | Seconds since the first sample of the session |
-| SAMPLE_DT_SEC | float | Interval to the previous row. carOBD logs several rows per timestamp, so 0 is common. |
-| TIME_SOURCE | str | MONOTONIC_SEC or ENGINE_RUN_TIME |
-| TIME_FLAGS | str | DUPLICATE_TIME, CLOCK_REVERSAL, TIME_GAP, MISSING_TIME |
-| TIME_BLOCK | int | Contiguous block; increments after any gap or reversal |
-| QUALITY_FLAGS | str | TIME_FLAGS plus MISSING_<PID> and CONNECTION_LOST |
-| DATA_QUALITY_OK | bool | False if a required PID is missing, a time gap or reversal occurred, or the connection was lost |
-| SPEED_SMOOTH_KMH | float, km/h | Trailing rolling median of speed |
-| ACCELERATION_MPS2 | float, m/s² | Trailing rate of smoothed speed; null at the start of a time block |
-| RPM_DELTA_PER_SEC, LOAD_DELTA_PER_SEC, THROTTLE_DELTA_PER_SEC | float | Trailing rates; null if the source PID is unavailable |
-| SECONDS_SINCE_ENGINE_START | float, s | Null while the engine is off or its age is unknown |
+### Vehicle and Air Readings
+- 'VEHICLE_SPEED' - Vehicle speed (source units)
+- 'COOLANT_TEMPERATURE' - Coolant temperature (source units)
+- 'MAF' - Mass airflow (source units)
+- 'INTAKE_PRESSURE' - Intake pressure (source units)
+- 'INTAKE_TEMPERATURE' - Intake air temperature (source units)
 
-Mode-state columns are documented in `docs/mode_taxonomy.md`.
+### Fuel Readings
+- 'SHORT_FUEL_TRIM_1' - Short-term fuel correction (%)
+- 'LONG_FUEL_TRIM_1' - Long-term fuel correction (%)
 
-## carOBD reading note
+All sensor readings are 'float | None'. They default to 'None' when a reading is unavailable.
 
-carOBD data rows end with a trailing comma, so each row has one more field than the header. Reading with plain `pd.read_csv` shifts every column name one place left without raising an error. `adapters/csv_source.read_raw_csv` uses `index_col=False` to prevent this.
+Raw sensor units depend on the data source and need to be identified before conversion.
+
+---
+
+## 2. NormalizedSample
+**Stores the raw sample, data quality information, and calculated values.**
+
+### Original Data
+- 'RAW_SAMPLE' (OBDSample) - Original OBD reading
+
+### Timing
+- 'SAMPLE_DT_SEC' - Time between samples (seconds)
+- 'PID_AGE_SEC' - Dictionary of how old each sensor reading is (seconds)
+- 'SECONDS_SINCE_ENGINE_START' - Seconds since startup
+
+### Data Quality
+- 'PID_VALIDITY' - Dictionary of valid/invalid sensor readings
+- 'DATA_QUALITY_OK' - True if the sample passes quality checks
+- 'QUALITY_FLAGS' - List of problems with the data
+
+### Calculated Values
+- 'SPEED_SMOOTH_KMH' - Smoothed speed (km/h)
+- 'ACCELERATION_MPS2' - Acceleration (m/s²)
+- 'RPM_DELTA_PER_SEC' - RPM change per second
+- 'LOAD_DELTA_PER_SEC' - Engine load change (% points/s)
+- 'THROTTLE_DELTA_PER_SEC' - Throttle change (% points/s)
+
+Calculated numeric values can be 'None' when unavailable.
+
+The preprocessing code calculates these values later. The storage of converted sensor readings still needs to be finalized.
+
+---
+
+## 3. ModeState
+**Stores what the vehicle is currently doing.**
+
+### Engine Conditions
+- 'ENGINE_STATE' - OFF / RUNNING / UNKNOWN
+- 'THERMAL_STATE' - STARTUP_WARMUP / WARM_OR_UNKNOWN
+- 'LOAD_STATE' - LOW / MEDIUM / HIGH / UNKNOWN
+
+### Driving Mode
+- 'MOTION_STATE_RAW' - Initial driving mode
+- 'MOTION_STATE' - Stable driving mode
+
+Possible modes:
+- IDLE
+- ACCELERATING
+- CRUISING
+- COASTING_DECEL
+- STRONG_DECEL
+- UNKNOWN_TRANSITION
+
+### Other Information
+- 'MODE_CONFIDENCE' - Confidence score from 0 to 1
+- 'MODE_REASON' - List of reasons for the classification
+- 'MODE_SEGMENT_ID' - ID for the continuous driving mode segment, or None
+
+---
+
+## 4. FeatureWindow
+**Stores information collected over a period of time.**
+
+### Identification
+- 'WINDOW_ID' - Window ID
+- 'SESSION_ID' - Driving session ID
+- 'MODE_SEGMENT_ID' - Driving mode segment ID
+- 'MOTION_STATE' - Mode being analyzed
+
+### Time and Samples
+- 'WINDOW_START_SEC' - Start time (seconds)
+- 'WINDOW_END_SEC' - End time (seconds)
+- 'DURATION_SEC' - Window length (seconds)
+- 'SAMPLE_COUNT' - Number of samples
+
+### Analysis
+- 'MIN_MODE_CONFIDENCE' - Lowest mode confidence in the window
+- 'QUALITY_FLAGS' - List of data quality problems
+- 'FEATURES' - Dictionary of calculated statistics
+
+Examples of features:
+- Average RPM
+- RPM standard deviation
+- Average engine load
+
+---
+
+## 5. AnomalyResult
+**Stores the result from the anomaly detection model.**
+
+### Result Information
+- 'RESULT_TIME_UTC' - Time of the result
+- 'WINDOW_ID' - Window being analyzed
+- 'MOTION_STATE' - Driving mode used
+- 'MODE_CONFIDENCE' - Confidence in that mode
+
+### Model Output
+- 'STATUS' - NORMAL / ANOMALOUS / UNSCORED
+- 'ANOMALY_SCORE' - Score from the model
+- 'THRESHOLD' - Threshold used for the decision
+- 'MODEL_VERSION' - Model version
+
+### Explanation
+- 'TOP_CONTRIBUTORS' - List of features contributing to the result
+- 'REASON' - Explanation, especially for UNSCORED results
+
+### Status Meanings
+- **NORMAL:** Behavior matches what the model considers normal.
+- **ANOMALOUS:** Behavior is unusual compared to the model's normal data.
+- **UNSCORED:** The program could not make a decision.
+
+An anomaly does not necessarily mean something is broken.
+
+---
+
+## Notes
+
+- 'str' = text
+- 'float' = number that can have decimals
+- 'int' = whole number
+- 'bool' = True or False
+- 'datetime' = date and time
+- 'list' = collection of items
+- 'dict' = collection of key-value pairs
+- 'None' = no value available
+
+The classes store information. Other Python files will perform the actual calculations and processing.

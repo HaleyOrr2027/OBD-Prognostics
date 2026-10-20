@@ -1,79 +1,92 @@
-"""Step 02: data contracts.
 
-Partial: defines the column vocabulary and mode-state values from plan.md
-Sections 2.1-2.4, which the mode detector produces. Feature-window and
-anomaly-result contracts (2.5, 2.6) are left for Steps 33+.
+#
+# Filename: schemas.py
+# Description: Defines the data structures used in the OBD project
+#
 
-Batch processing uses pandas DataFrames whose columns follow these names.
-"""
-
-from __future__ import annotations
-
-from enum import Enum
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
-class EngineState(str, Enum):
-    OFF = "OFF"
-    RUNNING = "RUNNING"
-    UNKNOWN = "UNKNOWN"
+# Raw OBD data
+@dataclass
+class OBDSample:
+    SESSION_ID: str          # Identifies which driving/collection session the reading came from
+    TIMESTAMP_UTC: datetime  # Actual date and time the reading was collected
+    MONOTONIC_SEC: float     # Time measured using a steadily increasing clock
+    VEHICLE_ID: str          # Identifies the vehicle without needing personal information
+    SOURCE: str              # Whether the reading came from a CSV or Bluetooth adapter
+    CONNECTION_OK: bool      # Whether the adapter connection is working
+    ENGINE_RPM: float | None = None            # How fast the engine is rotating
+    VEHICLE_SPEED: float | None = None         # How fast the car is moving
+    ENGINE_LOAD: float | None = None           # Relative engine demand
+    THROTTLE_POSITION: float | None = None     #Throttle opening
+    COOLANT_TEMPERATURE: float | None = None    # Engine coolant temperature
+    MAF: float | None = None                    # Mass airflow entering the engine
+    INTAKE_PRESSURE: float | None = None        # Intake manifold pressure
+    INTAKE_TEMPERATURE: float | None = None     # Air temperature entering the engine
+    SHORT_FUEL_TRIM_1: float | None = None      # Short-term fuel mixture correction
+    LONG_FUEL_TRIM_1: float | None = None       # Long-term fuel mixture correction
+    ENGINE_RUN_TIME: float | None = None        # Time since the engine started
 
 
-class ThermalState(str, Enum):
-    STARTUP_WARMUP = "STARTUP_WARMUP"
-    WARM_OR_UNKNOWN = "WARM_OR_UNKNOWN"
+# Cleaned OBD data
+@dataclass
+class NormalizedSample:
+    RAW_SAMPLE: OBDSample
+    SAMPLE_DT_SEC: float | None = None
+    PID_VALIDITY: dict = field(default_factory=dict)
+    PID_AGE_SEC: dict = field(default_factory=dict)
+    DATA_QUALITY_OK: bool = False
+    QUALITY_FLAGS: list = field(default_factory=list)
+    SPEED_SMOOTH_KMH: float | None = None
+    ACCELERATION_MPS2: float | None = None
+    RPM_DELTA_PER_SEC: float | None = None
+    LOAD_DELTA_PER_SEC: float | None = None
+    THROTTLE_DELTA_PER_SEC: float | None = None
+    SECONDS_SINCE_ENGINE_START: float | None = None
 
 
-class MotionState(str, Enum):
-    ENGINE_OFF = "ENGINE_OFF"
-    STARTUP_WARMUP = "STARTUP_WARMUP"
-    IDLE = "IDLE"
-    ACCELERATING = "ACCELERATING"
-    CRUISING = "CRUISING"
-    COASTING_DECEL = "COASTING_DECEL"
-    STRONG_DECEL = "STRONG_DECEL"
-    UNKNOWN_TRANSITION = "UNKNOWN_TRANSITION"
+# Current driving mode
+@dataclass
+class ModeState:
+    ENGINE_STATE: str
+    THERMAL_STATE: str
+    MOTION_STATE_RAW: str
+    MOTION_STATE: str
+    LOAD_STATE: str
+    MODE_CONFIDENCE: float
+
+    MODE_REASON: list = field(default_factory=list)
+    MODE_SEGMENT_ID: str | None = None
 
 
-class LoadState(str, Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    UNKNOWN = "UNKNOWN"
+# Features from a window of data
+@dataclass
+class FeatureWindow:
+    WINDOW_ID: str
+    SESSION_ID: str
+    MODE_SEGMENT_ID: str
+    MOTION_STATE: str
+    WINDOW_START_SEC: float
+    WINDOW_END_SEC: float
+    DURATION_SEC: float
+    SAMPLE_COUNT: int
+    MIN_MODE_CONFIDENCE: float
+    QUALITY_FLAGS: list = field(default_factory=list)
+    FEATURES: dict = field(default_factory=dict)
 
 
-# Motion states a per-mode anomaly model may score. Everything else abstains.
-ROUTABLE_STATES = (
-    MotionState.IDLE,
-    MotionState.ACCELERATING,
-    MotionState.CRUISING,
-    MotionState.COASTING_DECEL,
-    MotionState.STRONG_DECEL,
-)
-
-# Section 2.1 metadata.
-RAW_METADATA = ("SESSION_ID", "TIMESTAMP_UTC", "MONOTONIC_SEC", "VEHICLE_ID", "SOURCE", "CONNECTION_OK")
-
-# Section 2.2 additions.
-NORMALIZED_COLUMNS = ("ELAPSED_SEC", "SAMPLE_DT_SEC", "DATA_QUALITY_OK", "QUALITY_FLAGS")
-
-# Section 2.3 additions.
-DERIVED_COLUMNS = (
-    "SPEED_SMOOTH_KMH",
-    "ACCELERATION_MPS2",
-    "RPM_DELTA_PER_SEC",
-    "LOAD_DELTA_PER_SEC",
-    "THROTTLE_DELTA_PER_SEC",
-    "SECONDS_SINCE_ENGINE_START",
-)
-
-# Section 2.4 mode-state contract.
-MODE_COLUMNS = (
-    "ENGINE_STATE",
-    "THERMAL_STATE",
-    "MOTION_STATE_RAW",
-    "MOTION_STATE",
-    "LOAD_STATE",
-    "MODE_CONFIDENCE",
-    "MODE_REASON",
-    "MODE_SEGMENT_ID",
-)
+# Anomaly detection result
+@dataclass
+class AnomalyResult:
+    RESULT_TIME_UTC: datetime
+    WINDOW_ID: str
+    MOTION_STATE: str
+    MODE_CONFIDENCE: float
+    STATUS: str
+    ANOMALY_SCORE: float | None = None
+    THRESHOLD: float | None = None
+    MODEL_VERSION: str | None = None
+    TOP_CONTRIBUTORS: list = field(default_factory=list)
+    REASON: str | None = None
