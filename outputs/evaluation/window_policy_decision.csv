@@ -1,0 +1,5 @@
+dwell_sec,drive12_tuning_exact,drive12_tuning_within_2s,drive3_held out_exact,drive3_held out_within_2s,IDLE_windows,IDLE_sessions,CRUISING_windows,CRUISING_sessions,ACCELERATING_windows,ACCELERATING_sessions,COASTING_DECEL_windows,COASTING_DECEL_sessions,STRONG_DECEL_windows,STRONG_DECEL_sessions
+0.0,0.797,0.98,0.688,0.95,3891,107,619,78,1948,82,1511,81,0,0
+1.0,0.66,0.833,0.641,0.794,3915,109,4414,82,3743,82,2774,82,20,16
+2.0,0.65,0.81,0.628,0.771,3915,109,5163,82,3680,82,2772,82,20,16
+3.0,0.56,0.67,0.615,0.694,4016,110,6013,82,4945,82,3705,82,34,25

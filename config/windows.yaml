@@ -1,3 +1,35 @@
-# Fill this from measured mode-segment durations during Step 30.
+# Step 30: per-mode window policy.
+# Justification and the segment-duration evidence: docs/mode_taxonomy.md "Window policy".
+# Regenerate the evidence: python scripts/window_policy_report.py
 version: 1
-modes: {}
+
+defaults:
+  # carOBD timestamps advance about every 2 s (Step 11 measurement), so this
+  # many distinct timestamps is the floor for mean / std / slope features.
+  min_distinct_times: 3
+  # A window is rejected if two consecutive distinct timestamps are further apart.
+  max_internal_gap_sec: 3.0
+  # Windows that would run past the end of their segment are dropped, not padded.
+  discard_partial_final: true
+  # Every sample in the window must be at least this confident (modes.yaml confidence).
+  min_mode_confidence: 0.5
+
+modes:
+  IDLE:
+    window_sec: 20.0
+    stride_sec: 10.0
+  CRUISING:
+    window_sec: 8.0
+    stride_sec: 4.0
+  ACCELERATING:
+    window_sec: 6.0
+    stride_sec: 2.0
+  COASTING_DECEL:
+    window_sec: 6.0
+    stride_sec: 2.0
+  STRONG_DECEL:
+    window_sec: 4.0
+    stride_sec: 2.0
+    # Fails the plan.md Section 6 data gates on carOBD (see report): kept so the
+    # report measures it, but the model registry should mark it unsupported in v1.
+    supported_v1: false
