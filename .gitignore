@@ -3,3 +3,5 @@ docs/site/
 logs/
 .vscode/
 .idea/
+.venv/
+__pycache__/
