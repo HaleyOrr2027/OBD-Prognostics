@@ -4,6 +4,9 @@
 import os
 import yaml
 
+# Error for invalid configuration settings
+class ConfigError(ValueError):
+    pass
 
 # Finds the main project folder
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -67,8 +70,26 @@ def apply_overrides(config, override_file):
 
 # Loads all project config files, checks required settings, applies
 # optional vehicle overrides, and returns the complete configuration.
+
 def load_config(vehicle_override=None):
     config = {}
+
+    # If a folder is provided, check that it contains our config files
+    if vehicle_override is not None and os.path.isdir(vehicle_override):
+
+        required_files = [
+            "pids.yaml",
+            "modes.yaml",
+            "windows.yaml",
+            "models.yaml",
+            "runtime.yaml"
+        ]
+
+        for filename in required_files:
+            path = os.path.join(vehicle_override, filename)
+
+            if not os.path.isfile(path):
+                raise ConfigError("Missing config file: " + path)
 
     config["pids"] = load_yaml("pids.yaml")
     config["modes"] = load_yaml("modes.yaml")
@@ -79,7 +100,7 @@ def load_config(vehicle_override=None):
     # Make sure runtime.yaml has a config version
     check_required_keys(
         config["runtime"],
-        ["config_version"],
+        ["version"],
         "runtime.yaml"
     )
 
@@ -88,6 +109,30 @@ def load_config(vehicle_override=None):
         apply_overrides(config, vehicle_override)
 
     # Save config version at the top level too
-    config["config_version"] = config["runtime"]["config_version"]
+    config["config_version"] = config["runtime"]["version"]
 
-    return config
+    return Config(config)
+
+class Config:
+
+    def __init__(self, settings):
+        self.settings = settings
+
+        self.pids = settings["pids"]
+        self.modes = settings["modes"]
+        self.windows = settings["windows"]
+        self.models = settings["models"]
+        self.runtime = settings["runtime"]
+
+    def get(self, *keys):
+        value = self.settings
+
+        for key in keys:
+            if not isinstance(value, dict) or key not in value:
+                raise ConfigError(
+                    "Missing config key: " + ".".join(keys)
+                )
+
+            value = value[key]
+
+        return value
