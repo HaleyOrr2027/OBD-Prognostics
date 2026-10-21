@@ -5,3 +5,17 @@ logs/
 .idea/
 .venv/
 __pycache__/
+.pytest_cache/
+
+# Raw data is fetched, not committed (scripts/fetch_carobd.py); generated data is reproducible.
+data/raw/
+data/raw_binary/
+data/labeled/
+data/inventory/
+data/windows/
+outputs/plots/*.png
+!outputs/plots/mode_review_drive3_600-900.png
+!outputs/plots/mode_review_drive12_1480-1780.png
+# Advisor's truck logs and anything derived from them stay out of this public repo
+outputs/evaluation/truck_c1500_*
+outputs/plots/truck_c1500_*
