@@ -57,7 +57,7 @@ This draws the detected and reference strips above speed, acceleration (with thr
 
 **Not yet validated:**
 
-- A drive with independent ground truth: a passenger writing down timestamped events while the Pi logs.
+- A drive with independent ground truth: a passenger writing down timestamped events while the Pi logs. The procedure and tooling are ready (`docs/data_collection_protocol.md`, `scripts/event_log_to_labels.py`); the drive itself has not happened yet.
 - The STRONG_DECEL threshold.
 - The startup guard length.
 - Any vehicle other than the carOBD car.
