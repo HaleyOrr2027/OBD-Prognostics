@@ -118,8 +118,9 @@ def main() -> int:
 
     out_dir = config.path("outputs", "plots")
     out_dir.mkdir(parents=True, exist_ok=True)
-    for ext, dpi in (("pdf", None), ("png", 300)):
-        fig.savefig(out_dir / f"poster_mode_detection.{ext}", dpi=dpi, facecolor=SURFACE)
+    # No timestamps in the file metadata, so regenerating gives identical bytes.
+    fig.savefig(out_dir / "poster_mode_detection.pdf", facecolor=SURFACE, metadata={"CreationDate": None, "ModDate": None})
+    fig.savefig(out_dir / "poster_mode_detection.png", dpi=300, facecolor=SURFACE, metadata={"Software": None})
     print(f"Saved outputs/plots/poster_mode_detection.pdf and .png ({exact:.1f}% exact, {near:.1f}% within 2 s)")
     return 0
 
