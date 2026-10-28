@@ -38,6 +38,7 @@ python training/02_label_modes.py               # writes data/labeled/<session>.
 python training/03_build_mode_inventory.py      # how much data exists per mode
 python scripts/score_modes.py drive3 data/reference_labels/drive3_600-900.csv   # accuracy vs hand labels
 python scripts/plot_mode_review.py drive3 --start 600 --end 900 --reference data/reference_labels/drive3_600-900.csv
+python scripts/window_policy_report.py     # Step 30: windows per mode and accuracy, per hold time
 python -m pytest tests/unit
 ```
 
