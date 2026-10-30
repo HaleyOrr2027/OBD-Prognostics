@@ -12,7 +12,7 @@ import pandas as pd
 
 from ..config import Config
 from ..schemas import ROUTABLE_STATES, EngineState, MotionState, ThermalState
-from .engine_state import detect_engine_state
+from .engine_state import detect_engine_state, rpm_speed_conflict
 from .load_state import detect_load_state
 from .motion_state import detect_motion_state_raw
 from .persistence import apply_persistence
@@ -22,7 +22,7 @@ from .thermal_state import detect_thermal_state, seconds_since_engine_start
 ROUTABLE = {s.value for s in ROUTABLE_STATES}
 
 
-def _compose(frame: pd.DataFrame, engine: pd.Series, thermal: pd.Series, motion: pd.Series):
+def _compose(frame: pd.DataFrame, engine: pd.Series, thermal: pd.Series, motion: pd.Series, config: Config):
     state = motion.copy()
     reason = pd.Series("", index=frame.index, dtype=object)
 
@@ -37,7 +37,16 @@ def _compose(frame: pd.DataFrame, engine: pd.Series, thermal: pd.Series, motion:
     reason[off] += "ENGINE_OFF;"
     state[bad | unknown_engine] = MotionState.UNKNOWN_TRANSITION.value
     reason[bad] += "BAD_QUALITY;"
-    reason[unknown_engine] += "ENGINE_UNKNOWN;"
+    conflict = rpm_speed_conflict(frame, config)
+    reason[conflict] += "RPM_SPEED_CONFLICT;"
+    reason[unknown_engine & ~conflict] += "ENGINE_UNKNOWN;"
+
+    # Context only: a stationary running engine above the usual idle range is
+    # still IDLE (when idle_rpm_max is null) but is marked so it can be reviewed.
+    flag_above = config.get("modes", "motion_state").get("idle_rpm_flag_above")
+    if flag_above is not None:
+        high_idle = (state == MotionState.IDLE.value) & (frame["ENGINE_RPM"] > float(flag_above))
+        reason[high_idle] += "IDLE_RPM_HIGH;"
 
     no_accel = frame["ACCELERATION_MPS2"].isna() & (state == MotionState.UNKNOWN_TRANSITION.value) & ~bad
     reason[no_accel] += "NO_ACCELERATION_YET;"
@@ -74,7 +83,7 @@ def detect_modes(frame: pd.DataFrame, config: Config) -> pd.DataFrame:
     thermal = detect_thermal_state(out["SECONDS_SINCE_ENGINE_START"], config)
     motion = detect_motion_state_raw(out, engine, config)
 
-    raw, reason = _compose(out, engine, thermal, motion)
+    raw, reason = _compose(out, engine, thermal, motion, config)
     stable = apply_persistence(raw, out["ELAPSED_SEC"], out["TIME_BLOCK"], config)
     confidence, reason = _confidence(out, raw, stable, reason, config)
 

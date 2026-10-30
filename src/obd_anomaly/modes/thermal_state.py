@@ -20,14 +20,20 @@ def seconds_since_engine_start(frame: pd.DataFrame, engine_state: pd.Series) -> 
     running = (engine_state == EngineState.RUNNING.value).to_numpy()
     run_time = frame["ENGINE_RUN_TIME"].to_numpy(dtype=float) if "ENGINE_RUN_TIME" in frame else None
 
+    off = (engine_state == EngineState.OFF.value).to_numpy()
+
     out = np.full(len(frame), np.nan)
     start_time = None
     for i in range(len(frame)):
         if not running[i]:
-            start_time = None
+            # Only a real OFF resets the timer. UNKNOWN (lost connection or an
+            # RPM/speed conflict) keeps it, so a brief glitch mid-drive does not
+            # restart the 30 s startup guard.
+            if off[i]:
+                start_time = None
             continue
         if start_time is None:
-            just_started = i > 0 and not running[i - 1]
+            just_started = i > 0 and off[i - 1]
             if just_started:
                 start_time = elapsed[i]
             elif run_time is not None and np.isfinite(run_time[i]):
