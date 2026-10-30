@@ -19,3 +19,4 @@ outputs/plots/*.png
 # Advisor's truck logs and anything derived from them stay out of this public repo
 outputs/evaluation/truck_c1500_*
 outputs/plots/truck_c1500_*
+!outputs/plots/poster_mode_detection.png
