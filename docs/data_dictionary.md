@@ -162,3 +162,26 @@ An anomaly does not necessarily mean something is broken.
 - 'None' = no value available
 
 The classes store information. Other Python files will perform the actual calculations and processing.
+
+## Training file (Steps 33–35)
+
+`python training/04_build_windows.py` writes `data/windows/windows.parquet`, one row per pure-mode window. The schema lives in `config/models.yaml` and is copied with every build to `data/windows/feature_schema.json`.
+
+| Column | Meaning |
+|---|---|
+| WINDOW_ID, SESSION_ID, VEHICLE_ID, MODE_SEGMENT_ID | Where the window came from |
+| MOTION_STATE | Kind of driving; never mixed within a window |
+| WINDOW_START_SEC, WINDOW_END_SEC, DURATION_SEC | Window time span (session seconds) |
+| SAMPLE_COUNT, DISTINCT_TIMES, MIN_MODE_CONFIDENCE | Window quality |
+| QUALITY_FLAGS | Window flags, plus MISSING_<SIGNAL> for an absent optional signal |
+| FEATURE_SCHEMA_VERSION, CONFIG_VERSION | What it was built with |
+| `<SIGNAL>__<stat>` | 43 summary features (below) |
+
+Each of VEHICLE_SPEED, ENGINE_RPM, THROTTLE_POSITION, ENGINE_LOAD (required) and INTAKE_PRESSURE, SHORT_FUEL_TRIM_1, LONG_FUEL_TRIM_1 (optional) gets six statistics:
+- `mean`, `std` (population), `min` and `max`
+- `delta`: last value minus first value
+- `slope`: least-squares change per second
+
+COOLANT_TEMPERATURE gets `mean` only, as warm-up context.
+
+Rows that share a timestamp are averaged before computing statistics, so carOBD's duplicated rows aren't counted twice. If a required signal has no reading, the window is dropped. If an optional signal has no reading, its features are NaN and the row is flagged; nothing is filled in.

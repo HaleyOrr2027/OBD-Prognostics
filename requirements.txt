@@ -6,3 +6,4 @@ joblib
 PyYAML
 matplotlib
 pytest
+pyarrow
