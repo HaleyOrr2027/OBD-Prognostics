@@ -1,3 +1,30 @@
-# Define mode-specific feature/model contracts during Steps 33+.
+# Steps 33+: feature schema and, later, per-mode model contracts.
 version: 1
+
+feature_schema:
+  # Bump when any signal, statistic or null rule below changes. Every row of
+  # data/windows/windows.parquet records the version it was built with.
+  version: 1
+
+  # Statistics computed for every signal, in this order. Feature names are
+  # <SIGNAL>__<stat>, e.g. ENGINE_RPM__mean.
+  #   mean, std (population), min, max  - level and spread within the window
+  #   delta  - last value minus first value
+  #   slope  - least-squares change per second
+  stats: [mean, std, min, max, delta, slope]
+
+  signals:
+    # A window missing any of these is dropped (reason MISSING_REQUIRED).
+    required: [VEHICLE_SPEED, ENGINE_RPM, THROTTLE_POSITION, ENGINE_LOAD]
+    # Kept as NaN when missing, never filled in; the row is flagged instead.
+    optional: [INTAKE_PRESSURE, SHORT_FUEL_TRIM_1, LONG_FUEL_TRIM_1]
+
+  # Context, not behaviour: mean only, so warm-up state is visible to the
+  # model without adding six coolant features.
+  context:
+    COOLANT_TEMPERATURE: [mean]
+
+  # ACCELERATION_MPS2 is left out on purpose: it decides the mode, and
+  # VEHICLE_SPEED__slope already carries the same information.
+
 modes: {}
