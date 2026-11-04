@@ -21,7 +21,15 @@ def label_frame(raw: pd.DataFrame, config: Config) -> pd.DataFrame:
     frame = build_timebase(frame, config)
     frame = add_quality_flags(frame, config)
     frame = add_derived_signals(frame, config)
-    frame = detect_driver_request(frame)
+    request_options = {}
+    # These resting values were measured from carOBD drive3, not from all cars.
+    if "VEHICLE_ID" in frame and frame["VEHICLE_ID"].eq("carOBD").all():
+        calibration = config.runtime.get("driver_request", {})
+        request_options = {
+            "pedal_baselines": calibration.get("carobd_pedal_baselines", {}),
+            "released_max": calibration.get("carobd_rest_tolerance_percent", 0.8),
+        }
+    frame = detect_driver_request(frame, **request_options)
     return detect_modes(frame, config)
 
 
