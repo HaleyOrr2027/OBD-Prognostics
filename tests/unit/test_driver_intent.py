@@ -78,3 +78,26 @@ def test_future_input_does_not_change_past_results():
     before = detect_driver_request(frame([10, 12, 14, 16]))
     after = detect_driver_request(frame([10, 12, 14, 50]))
     assert before["DRIVER_REQUEST"].iloc[:3].tolist() == after["DRIVER_REQUEST"].iloc[:3].tolist()
+
+
+def test_calibrated_nonzero_pedal_rest():
+    # carOBD sensor resting values are not zero, and channel offsets differ.
+    baseline = {"ACCELERATOR_PEDAL_POSITION_D": 16.078432,
+                "ACCELERATOR_PEDAL_POSITION_E": 31.764706}
+    out = detect_driver_request(frame([16.078432, 16.078432, 16.078432],
+                                      [31.764706, 31.764706, 31.764706]),
+                                pedal_baselines=baseline, released_max=0.8)
+    assert out["DRIVER_REQUEST"].tolist() == [
+        "UNKNOWN_REQUEST", "NO_ACCELERATOR_REQUEST", "NO_ACCELERATOR_REQUEST"]
+    without = detect_driver_request(frame([16.078432, 16.078432],
+                                          [31.764706, 31.764706]))
+    assert without["DRIVER_REQUEST"].iloc[-1] == "MAINTAIN_REQUEST"
+
+
+def test_calibrated_rest_does_not_hide_increasing_pedal():
+    baseline = {"ACCELERATOR_PEDAL_POSITION_D": 16.078432,
+                "ACCELERATOR_PEDAL_POSITION_E": 31.764706}
+    out = detect_driver_request(frame([16.078432, 21.078432],
+                                      [31.764706, 36.764706]),
+                                pedal_baselines=baseline, released_max=0.8)
+    assert out["DRIVER_REQUEST"].iloc[-1] == "ACCELERATE_REQUEST"
