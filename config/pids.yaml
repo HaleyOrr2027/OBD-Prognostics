@@ -11,6 +11,9 @@ optional:
   - SHORT_FUEL_TRIM_1
   - LONG_FUEL_TRIM_1
   - ENGINE_RUN_TIME
+  - ACCELERATOR_PEDAL_POSITION_D
+  - ACCELERATOR_PEDAL_POSITION_E
+  - COMMANDED_THROTTLE_ACTUATOR
 
 pids:
   ENGINE_RPM:
@@ -57,3 +60,18 @@ pids:
     obd_command: RUN_TIME
     unit: s
     aliases: [engine_run_time, engine_run_tine, run_time]
+  ACCELERATOR_PEDAL_POSITION_D:
+    # Standard OBD PID 0x49; carOBD CSV header is PEDAL_D ().
+    obd_command: ACCELERATOR_POS_D
+    unit: percent
+    aliases: [pedal_d, accelerator_pedal_position_d, accelerator_pos_d]
+  ACCELERATOR_PEDAL_POSITION_E:
+    # Standard OBD PID 0x4A; independently scaled channel (not necessarily equal to D).
+    obd_command: ACCELERATOR_POS_E
+    unit: percent
+    aliases: [pedal_e, accelerator_pedal_position_e, accelerator_pos_e]
+  COMMANDED_THROTTLE_ACTUATOR:
+    # ECU-requested throttle opening is NOT a direct pedal reading.
+    obd_command: THROTTLE_ACTUATOR
+    unit: percent
+    aliases: [commanded_throttle_actuator, throttle_actuator]
