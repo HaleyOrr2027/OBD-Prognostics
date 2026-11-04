@@ -48,8 +48,8 @@ def detect_driver_request(frame: pd.DataFrame, *, threshold: float = 2.0,
         for t, group in out.loc[indexes].groupby(times.loc[indexes], sort=False):
             if not np.isfinite(t):
                 continue
-            current = {name: float(signals[name].loc[group].median())
-                       if signals[name].loc[group].notna().any() else np.nan
+            current = {name: float(signals[name].loc[group.index].median())
+                       if signals[name].loc[group.index].notna().any() else np.nan
                        for name in DIRECT + PROXIES}
             gap_ok = prev_t is not None and 0 < t-prev_t <= max_gap_sec
             direct = [n for n in DIRECT if np.isfinite(current[n])]
