@@ -30,7 +30,7 @@ def test_real_carobd_column_aliases():
 
 
 def test_increase_hold_release():
-    out = detect_driver_request(frame([10, 15, 15, 4, 4], [20, 25, 25, 14, 3]))
+    out = detect_driver_request(frame([10, 15, 15, 4, 0], [20, 25, 25, 14, 3]))
     assert out["DRIVER_REQUEST"].tolist() == [
         "UNKNOWN_REQUEST", "ACCELERATE_REQUEST", "MAINTAIN_REQUEST",
         "RELEASE_ACCELERATOR", "RELEASE_ACCELERATOR"
