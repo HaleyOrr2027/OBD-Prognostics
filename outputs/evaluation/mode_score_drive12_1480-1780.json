@@ -1,0 +1,47 @@
+{
+  "session": "drive12",
+  "label_file": "data/reference_labels/drive12_1480-1780.csv",
+  "config_version": "pids-v1_modes-v1",
+  "seconds_scored": 300,
+  "exact_agreement": 0.797,
+  "agreement_within_2s": 0.98,
+  "recall": {
+    "idle": 1.0,
+    "accel": 0.803,
+    "decel": 0.726,
+    "steady": 0.606
+  },
+  "unscored_fraction": 0.0,
+  "median_transition_delay_sec": 1.0,
+  "segments_per_minute": 12.0,
+  "confusion_matrix": {
+    "idle": {
+      "idle": 89,
+      "accel": 0,
+      "decel": 0,
+      "steady": 0,
+      "unscored": 0
+    },
+    "accel": {
+      "idle": 2,
+      "accel": 49,
+      "decel": 5,
+      "steady": 5,
+      "unscored": 0
+    },
+    "decel": {
+      "idle": 0,
+      "accel": 5,
+      "decel": 61,
+      "steady": 18,
+      "unscored": 0
+    },
+    "steady": {
+      "idle": 0,
+      "accel": 13,
+      "decel": 13,
+      "steady": 40,
+      "unscored": 0
+    }
+  }
+}

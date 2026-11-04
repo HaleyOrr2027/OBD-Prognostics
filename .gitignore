@@ -4,3 +4,5 @@ logs/
 .vscode/
 .idea/
 data/
+.venv/
+__pycache__/

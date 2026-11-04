@@ -1,0 +1,5 @@
+# Pi/runtime settings. Fill during live-integration stages.
+version: 1
+obd: {}
+logging: {}
+reconnect: {}
