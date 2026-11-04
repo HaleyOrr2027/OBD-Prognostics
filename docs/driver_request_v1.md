@@ -22,7 +22,7 @@ driver's intentions. Do not infer brake use, requested speed, or a mechanical fa
 
 ## Rules
 A >2 percentage-point increase -> ACCELERATE_REQUEST; a >2 point reduction ->
-RELEASE_ACCELERATOR. Stable low direct pedal (<=4%) -> NO_ACCELERATOR_REQUEST;
+RELEASE_ACCELERATOR. Stable low direct pedal (<=4% without a known baseline; or within configured source-specific baseline tolerance) -> NO_ACCELERATOR_REQUEST;
 other stable input -> MAINTAIN_REQUEST. Two pedal channels need consistent
 movement direction (their raw values need not match). Contradiction -> UNKNOWN.
 The first sample, samples following >3 s gaps, and missing inputs abstain.
@@ -45,3 +45,18 @@ Raw drive data is not committed.
 - carOBD has pedal columns, but other vehicles may not expose these PIDs.
 - No ground-truth driver-request labels or measured test accuracy yet.
 - No request/response fault classification in this PR.
+
+## First carOBD calibration review (drive3)
+The upstream `drive3.csv` was inspected, including raw sensor headers and all 2,926 rows (793 distinct engine-time readings). Sensor D repeatedly bottoms out at **16.078432%**, and E at **31.764706%**. Among stationary running samples, both medians equal those values. These are candidate resting offsets, NOT independently verified foot-off-pedal truth.
+
+To avoid making these offsets universal, `config/runtime.yaml` records the carOBD-specific baseline and a provisional **0.8 percentage-point** resting tolerance. `pipeline.py` applies it only when `VEHICLE_ID == 'carOBD'`. Other data sources keep the uncalibrated rules. This affects stable low-input classification only; increase and decrease thresholds remain 2 percentage points pending labeled validation.
+
+Reproduce the raw-data summary locally with:
+```bash
+python scripts/pedal_calibration_report.py drive3
+python training/02_label_modes.py drive3
+python -m pytest tests/unit -v
+```
+Check the change in `NO_ACCELERATOR_REQUEST` labels after regenerating `data/labeled/drive3.csv`.
+
+**Still needed:** ground-truth pedal-release observations and multi-session stability checks. Zero vehicle speed alone cannot prove that the driver wasn't pressing the accelerator.
