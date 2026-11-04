@@ -22,13 +22,15 @@ def _read(frame: pd.DataFrame, column: str) -> pd.Series:
     return values.where(values.between(0, 100))
 
 def detect_driver_request(frame: pd.DataFrame, *, threshold: float = 2.0,
-                          released_max: float = 4.0, max_gap_sec: float = 3.0) -> pd.DataFrame:
+                          released_max: float = 4.0, max_gap_sec: float = 3.0,
+                          pedal_baselines: dict[str, float] | None = None) -> pd.DataFrame:
     """Append estimate columns; unknown is a valid result.
 
     Threshold is a change in percentage points between distinct timestamps.
     No future samples used. A large time gap resets the reference.
     This v1 estimates pedal action, not braking or requested acceleration rate.
     """
+    pedal_baselines = pedal_baselines or {}
     out = frame.copy()
     for col in OUTPUTS:
         out[col] = np.nan if col in ("DRIVER_REQUEST_CONFIDENCE", "PEDAL_DELTA_PERCENT") else ""
@@ -73,7 +75,7 @@ def detect_driver_request(frame: pd.DataFrame, *, threshold: float = 2.0,
                             status, reason = "ACCELERATE_REQUEST", "INCREASING_INPUT"
                         elif directions[0] == -1:
                             status, reason = "RELEASE_ACCELERATOR", "DECREASING_INPUT"
-                        elif source == "PEDAL" and all(current[n] <= released_max for n in selected):
+                        elif source == "PEDAL" and all(current[n] <= pedal_baselines.get(n, 0.0) + released_max for n in selected):
                             status, reason = "NO_ACCELERATOR_REQUEST", "LOW_PEDAL"
                         else:
                             status, reason = "MAINTAIN_REQUEST", "STEADY_INPUT"
