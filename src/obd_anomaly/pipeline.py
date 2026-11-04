@@ -9,6 +9,7 @@ import pandas as pd
 from .adapters.csv_source import CSVSource
 from .config import Config, load_config
 from .modes.detector import detect_modes
+from .intent.detector import detect_driver_request
 from .preprocessing.derived_signals import add_derived_signals
 from .preprocessing.normalize import normalize_columns
 from .preprocessing.quality import add_quality_flags
@@ -20,6 +21,7 @@ def label_frame(raw: pd.DataFrame, config: Config) -> pd.DataFrame:
     frame = build_timebase(frame, config)
     frame = add_quality_flags(frame, config)
     frame = add_derived_signals(frame, config)
+    frame = detect_driver_request(frame)
     return detect_modes(frame, config)
 
 
