@@ -1,1681 +1,566 @@
-# OBD Prognostics — Implementation Plan
+# Mode-Aware OBD-II Anomaly Detection on Raspberry Pi
 
-> **Purpose of this branch:** this is a starter repository, not a finished project. The files are intentionally empty or skeletal. Implement the project in the order below. Do not skip artifact/validation steps just because a later model can technically be trained.
+> **Status:** planning · **Last updated:** 2026-09-29
+> **One-line summary:** Feed OBD-II data in, figure out *what the car is doing* (idle, accelerating, decelerating, ...), then decide whether the sensors look normal *for that mode* — all running on a Raspberry Pi.
 
 ---
 
-# 0. Project Goal
+## Table of contents
 
-Build a Raspberry Pi system that connects to a vehicle through a Bluetooth OBD-II adapter, continuously collects supported OBD-II PIDs, determines the vehicle's current operating context, and reports whether the observed behavior is anomalous **relative to that context**.
+1. [Goal and non-goals](#1-goal-and-non-goals)
+2. [Why the current approach is not enough](#2-why-the-current-approach-is-not-enough)
+3. [Driving and engine modes (research summary)](#3-driving-and-engine-modes-research-summary)
+4. [System design](#4-system-design)
+5. [Repository layout — how the work is split up](#5-repository-layout--how-the-work-is-split-up)
+6. [Phases and tasks](#6-phases-and-tasks)
+7. [Evaluation plan](#7-evaluation-plan)
+8. [Raspberry Pi runtime plan](#8-raspberry-pi-runtime-plan)
+9. [Bootstrap: exact steps and full config files](#9-bootstrap-exact-steps-and-full-config-files)
+10. [Risks and open questions](#10-risks-and-open-questions)
+11. [References](#11-references)
 
-The core problem is conditional normality:
+---
 
-- 800 RPM may be normal at warm idle.
-- 3,000 RPM may be normal during acceleration.
-- falling manifold pressure may be normal during deceleration.
-- high load may be normal on a hill.
-- unstable RPM may be normal immediately after startup but suspicious after warm-up.
+## 1. Goal and non-goals
 
-Therefore the final system must **not** train one undifferentiated "normal driving" detector and apply it everywhere.
+**Goal.** A program on a Raspberry Pi that reads live (or replayed) OBD-II data and reports when the vehicle is behaving abnormally, where "abnormal" is judged **relative to the current operating mode**.
 
-The first production-worthy architecture should be:
+**Non-goals (for now).**
+- Not a safety-critical system. Output is advisory only.
+- Not fault *diagnosis* (which part is broken). We report which sensors contributed most to the score, nothing more.
+- Not multi-vehicle generalization. The dataset is one car (Toyota Etios 2014); anything beyond that is a later phase.
 
-```text
-Bluetooth OBD-II adapter
-        |
-        v
-raw PID acquisition + timestamps
-        |
-        v
-canonical schema + quality flags
-        |
-        v
-derived signals
-(speed smoothing, acceleration, deltas, age/staleness)
-        |
-        v
-context / mode detector
-        |
-        +--> ENGINE_OFF / STARTUP_WARMUP / UNKNOWN => abstain
-        |
-        v
-stable motion mode
-(IDLE / ACCELERATING / CRUISING / COASTING_DECEL / STRONG_DECEL)
-        |
-        v
-mode-specific window policy
-        |
-        v
-feature extraction
-        |
-        v
-model registry selects model for current mode
-        |
-        v
-anomaly score + mode-specific threshold
-        |
-        v
-NORMAL / ANOMALOUS / UNSCORED
-        |
-        v
-event merging + logs + explanation fields
+---
+
+## 2. Why the current approach is not enough
+
+The starting point is `car_obd_autoencoder_fixed.py` (Colab notebook exported as a script).
+
+**What it does today**
+1. Downloads the carOBD dataset and loads the `idle*.csv` recordings (47 files).
+2. Cuts each recording into 30-second windows using `ENGINE_RUN_TIME`, drops the last (incomplete) window, and computes mean and std of every sensor per window.
+3. Removes startup windows (RPM std > 200 in the first three windows), constant features, and hand-picked "nuisance" features (fuel tank, time since codes cleared, warm-ups since codes cleared).
+4. Splits **by recording**: idle1–33 train, idle34–40 calibration, idle41–47 test.
+5. Standardizes, then trains a small autoencoder (features → 24 → 8 → 24 → features) on healthy idle windows.
+6. Sets the anomaly threshold at the 99th percentile of calibration reconstruction error (about 1% false positives).
+7. For a new file: builds a time axis, estimates speed/acceleration, labels each sample with a rule-based mode (`ENGINE_OFF`, `STARTUP`, `IDLE`, `ACCELERATING`, `DECELERATING`, `CRUISING`, `UNKNOWN`), groups into segments, and scores **only** windows that are entirely `IDLE`.
+
+**The core gap:** mode detection exists, but only one mode has a model. Everything the car does while moving is labeled and then ignored. If you point the idle model at driving data you get meaningless scores, because "normal" for idle is not "normal" for acceleration.
+
+**Other issues found while reading the code** (full list is turned into tasks in [Phase 0](#phase-0--repo-bootstrap-and-refactor)):
+
+| # | Issue | Why it matters |
+|---|-------|----------------|
+| 1 | Nothing is saved: model, scaler, threshold, feature list, and sensor list live only in notebook globals | Cannot deploy to a Pi without retraining |
+| 2 | Depends on Colab (`/content`, `display()`, `git clone` inside the script) | Not runnable as a normal script or on a Pi |
+| 3 | Training "idle" comes from the *file name* (`idle*.csv`); inference "idle" comes from *speed ≤ 0.5 km/h*. Startup removal also differs (RPM-std heuristic in training vs. 30 s guard in inference) | Train/inference mismatch; the model may be scored on data unlike what it learned |
+| 4 | Threshold is the 99th percentile of only the 7 calibration recordings, and the same calibration set is used for early stopping | With few windows the percentile is basically the maximum; thresholds are noisy and slightly optimistic |
+| 5 | Split is by recording *number* (train = earliest, test = latest) | Any drift over time (season, temperature, wear) is confounded with the split; single vehicle, so no evidence of generalization |
+| 6 | One MSE averaged over ~38 standardized features | A fault in one sensor gets diluted by the other ~37; needs per-feature error or a max/top-k score |
+| 7 | Only validation is a fake overheating test (sets coolant mean=120, std=3, everything else untouched) | Shows the model rejects an impossible row, not that it finds realistic faults |
+| 8 | One window above threshold = anomaly | 1% per window still means frequent false alarms over hours; needs a persistence rule |
+| 9 | 30 s non-overlapping windows | Detection delay ≥ 30 s; acceleration and deceleration events are often shorter than 30 s, so a 30 s window will straddle modes |
+| 10 | Cold/warm engine state is not modeled (only the first minutes are dropped) | Idle at 40 °C coolant and idle at 90 °C look different and will cause false alarms |
+| 11 | Mode labeling uses `iterrows()` loops and back-fills labels after the debounce | Slow on a Pi; the back-fill uses future data, which a live system does not have |
+| 12 | Mode acceleration is derived from integer-resolution speed over ~4–5 s with a ±0.15 m/s² threshold | Near the noise floor; expect chatter between `CRUISING` and `ACCELERATING` unless validated |
+| 13 | No ground truth for modes, no evaluation of the mode labeler | We do not know how accurate the mode step is |
+| 14 | Full TensorFlow/Keras is a heavy dependency for a ~2,300-parameter network | Use LiteRT or a plain NumPy forward pass on the Pi |
+
+---
+
+## 3. Driving and engine modes (research summary)
+
+We need two different ideas of "mode": how the **car is moving**, and what the **engine controller is doing**. Both change what sensor values are normal.
+
+### 3.1 Motion modes (from emissions / driving-cycle literature)
+
+- The standard modal model splits driving into **idle, acceleration, cruise, deceleration**. Modal emission models compute results per mode.
+- Some studies define cruise as roughly −0.1 to +0.1 m/s², with acceleration above and deceleration below. Our code uses ±0.15 m/s². This is a tunable choice, not a law.
+- Real-world driving contains more acceleration/deceleration and less steady cruising than regulatory test cycles, so the transient modes cannot be treated as rare.
+- Speed–acceleration matrices (speed bins × acceleration bins) are a common way to define finer modes than four.
+
+### 3.2 Engine-controller modes (from ECU service documentation)
+
+Fuel-injection engine controllers commonly define: ignition on (zero RPM), **start-up (crank)**, **warm-up**, cruise, idle, acceleration, deceleration, **wide-open throttle**, and ignition off.
+
+- Start-up, warm-up, **deceleration with fuel shut-off**, and **wide-open throttle** are typically **open-loop** modes (fuel from a map, oxygen-sensor feedback not used).
+- Idle, cruise, and normal acceleration/deceleration on a warm engine are typically **closed-loop**.
+
+Why this matters for us: fuel trims and O2 sensor behavior mean something completely different in open vs. closed loop. A fuel-trim value that is fine during warm-up would be suspicious at warm cruise.
+
+### 3.3 Contextual anomaly detection (the framing we want)
+
+- Contextual anomaly detection separates **context variables** (what situation are we in) from **behavior variables** (what we are checking) and asks whether behavior is typical *given* context.
+- Work on vehicle anomaly detection from standard OBD-II/CAN data makes the same point: vehicle state depends strongly on operating context, so context must be estimated and accounted for.
+- Known failure mode: models dominated by frequent contexts mishandle rare contexts (false alarms or unstable decisions). We must handle sparse modes deliberately (see [Phase 4](#phase-4--per-mode-anomaly-models)).
+
+### 3.4 Proposed taxonomy for this project
+
+Sources above justify the top-level modes. The sub-modes are **proposals to be tested against data**, not established facts.
+
+| Layer | Modes | Basis |
+|-------|-------|-------|
+| Validity | `ENGINE_OFF`, `UNKNOWN` (missing/invalid data) | Never scored. Report as "not checked". |
+| Transient guard | `STARTUP` (first N seconds after engine on) | Already in code (30 s guard) |
+| Thermal state (separate axis) | `WARMING` vs `WARM` (threshold from coolant temperature, calibrated from data) | Warm-up is open-loop (sourced); the exact coolant cutoff is **TBD from data** |
+| Motion | `IDLE`, `ACCELERATING`, `CRUISING`, `DECELERATING` | Sourced (modal model) |
+| Sub-modes (Phase 3, data-driven) | Hard acceleration / wide-open throttle; deceleration with closed throttle (fuel cut) vs. braking to a stop; low-speed stop-and-go vs. steady cruise; low vs. high speed cruise; possibly gear (from RPM ÷ speed ratio) if the car is a manual | Proposed; keep only if clustering and per-mode error support it |
+
+Dataset context that helps us: the carOBD files are grouped as `idle` (stopped, engine on), `drive` (high-speed roads), `live` (a specific commute), `ufpe` (low-speed university campus), and `long` (long trips). The 27 PIDs come from a 2014 Toyota Etios. These file groups are **not** available at inference time, but they give us free sanity checks for the mode labeler (e.g., `ufpe` should be dominated by low-speed modes).
+
+### 3.5 Design rule: context inputs vs. behavior inputs
+
+The mode classifier must use a **small, robust set of signals** (speed, RPM, throttle, engine on/off, coolant for the thermal axis). The anomaly model then judges the **other** sensors (fuel trims, O2, MAF, MAP, intake temp, timing advance, load, ...). Reason: if a faulty sensor also decides the mode, the fault can hide itself by moving the car into a mode where that value is normal.
+
+Exact column roles are confirmed in Phase 1 and stored in `src/obdanom/data/schema.py`.
+
+---
+
+## 4. System design
+
+```mermaid
+flowchart LR
+    A[OBD source<br/>ELM327 or CSV replay] --> B[Ring buffer<br/>+ time axis]
+    B --> C[Context features<br/>speed, accel, RPM, throttle, coolant]
+    C --> D[Mode classifier<br/>rules v1, data-driven v2<br/>+ hysteresis]
+    B --> E[Window builder<br/>window length depends on mode]
+    D --> E
+    E --> F[Model router<br/>one model per mode]
+    F --> G[Scorer<br/>error per feature, score / threshold]
+    G --> H[Alert logic<br/>k-of-n, abstain if unchecked]
+    H --> I[Log + output]
 ```
 
-## 0.1 What this project is not
+**Decision flow for each incoming sample**
 
-This project is not a replacement for dashboard warning lamps, DTCs, manufacturer diagnostics, professional inspection, or any safety-critical control system. An anomaly means "unusual relative to the healthy data/model for this context," not automatically "this component is broken."
+1. Append to buffer; update speed, acceleration, engine-on state.
+2. Classify the mode with hysteresis (a new mode must persist for `persist_s` before it is confirmed). Live labeling is **causal only** — no back-filling.
+3. When a window for the current mode is complete (mode-specific length and minimum sample count), extract features.
+4. Route to that mode's model. If no model exists, or the mode has too little training data, mark the window **`UNCHECKED`** — never "OK".
+5. Score = reconstruction error divided by that mode's threshold. Keep per-feature errors so the output can say which sensors drove the score.
+6. Raise an alert only when `k` of the last `n` scored windows exceed threshold.
+7. Track and report **coverage**: what fraction of driving time was actually checked.
 
-## 0.2 Architecture decision for version 1
+**Model options to compare (Phase 4/5)**
 
-Use a **hierarchical context model** rather than exploding every combination into a separate flat class.
+| Option | Description | Pros | Cons |
+|--------|-------------|------|------|
+| A. One model per mode (hard routing) | Separate small autoencoder per mode | Simple, small, easy to deploy | Sparse modes have little data; hard boundaries |
+| B. Conditional autoencoder | Context (mode one-hot, speed, accel, thermal) fed to the network; reconstruct behavior features only | One model; smooth across mode boundaries | More sensitive to rare contexts (see 3.3) |
+| C. Predict-then-compare | Regress each behavior sensor from context, monitor residuals | Interpretable, per-sensor | More models; needs good context features |
+| Baseline | Per-mode robust z-score / Mahalanobis distance | Trivial to run on a Pi; strong sanity check | Ignores nonlinear structure |
 
-Track these axes:
-
-| Axis | Initial values | Used for |
-|---|---|---|
-| Engine state | OFF, RUNNING | hard scoring gate |
-| Thermal/start state | STARTUP_WARMUP, WARM_OR_UNKNOWN | scoring gate/context |
-| Motion state | IDLE, ACCELERATING, CRUISING, COASTING_DECEL, STRONG_DECEL, UNKNOWN_TRANSITION | primary model routing |
-| Load context | LOW, MEDIUM, HIGH, UNKNOWN | feature/context first; split models later only if data proves useful |
-
-The v1 anomaly registry should primarily route by **motion state**. Startup/warm-up should initially abstain unless enough healthy startup data is collected to justify a dedicated model. Load and thermal values should first be included as features/context rather than multiplying the number of models.
-
-This is a project engineering choice to validate against real drives, not a universal OBD rule.
+**Plan:** build the baseline first, then A, then B, and let the evaluation in Section 7 pick. Do not commit to a deep model before the baseline exists.
 
 ---
 
-# 1. Starter Repository Target Structure
+## 5. Repository layout — how the work is split up
 
-```text
-OBD-Prognostics/
-├── README.md
-├── plan.md
-├── requirements.txt
-├── requirements-pi.txt
+The notebook becomes a package. Each folder below is owned by one phase, so people can work in parallel without editing the same file.
+
+```
+obd-anomaly/
+├── plan.md                      # this file
+├── README.md                    # short intro + dataset citation
 ├── .gitignore
-│
-├── config/
-│   ├── pids.yaml
-│   ├── modes.yaml
-│   ├── windows.yaml
-│   ├── models.yaml
-│   └── runtime.yaml
-│
+├── requirements-train.txt       # laptop / Colab / server
+├── requirements-pi.txt          # Raspberry Pi runtime only
+├── configs/
+│   └── default.yaml             # every threshold and path lives here
 ├── docs/
-│   ├── data_dictionary.md
-│   ├── mode_taxonomy.md
-│   ├── data_collection_protocol.md
-│   └── validation_protocol.md
-│
-├── data/
-│   ├── raw/
-│   ├── inventory/
-│   ├── normalized/
-│   ├── labeled/
-│   ├── windows/
-│   └── manifests/
-│
-├── src/
-│   └── obd_anomaly/
-│       ├── __init__.py
-│       ├── schemas.py
-│       ├── config.py
-│       ├── pipeline.py
-│       ├── results.py
-│       │
-│       ├── adapters/
-│       │   ├── __init__.py
-│       │   ├── base.py
-│       │   ├── csv_source.py
-│       │   └── bluetooth_obd_source.py
-│       │
-│       ├── preprocessing/
-│       │   ├── __init__.py
-│       │   ├── normalize.py
-│       │   ├── timebase.py
-│       │   ├── quality.py
-│       │   └── derived_signals.py
-│       │
-│       ├── modes/
-│       │   ├── __init__.py
-│       │   ├── engine_state.py
-│       │   ├── thermal_state.py
-│       │   ├── motion_state.py
-│       │   ├── load_state.py
-│       │   ├── persistence.py
-│       │   ├── detector.py
-│       │   └── segments.py
-│       │
-│       ├── features/
-│       │   ├── __init__.py
-│       │   ├── buffer.py
-│       │   ├── windows.py
-│       │   └── extract.py
-│       │
-│       └── anomaly/
-│           ├── __init__.py
-│           ├── registry.py
-│           ├── scorer.py
-│           ├── explain.py
-│           └── events.py
-│
-├── training/
-│   ├── 00_inventory_raw_data.py
-│   ├── 01_normalize_sessions.py
-│   ├── 02_label_modes.py
-│   ├── 03_build_mode_inventory.py
-│   ├── 04_build_windows.py
-│   ├── 05_make_splits.py
-│   ├── 06_fit_scalers.py
-│   ├── 07_train_baselines.py
-│   ├── 08_calibrate_thresholds.py
-│   ├── 09_evaluate_healthy.py
-│   └── 10_export_registry.py
-│
+│   ├── research-modes.md        # expanded version of Section 3 (Phase 3)
+│   ├── architecture.md          # expanded version of Section 4
+│   ├── evaluation.md            # fault catalogue + results (Phase 5)
+│   └── pi-deployment.md         # wiring, install, benchmarks (Phase 6)
+├── notebooks/
+│   └── 00_original_idle_autoencoder.py   # the uploaded script, untouched, for reference
+├── src/obdanom/
+│   ├── __init__.py
+│   ├── config.py                # load configs/default.yaml
+│   ├── data/
+│   │   ├── loader.py            # read CSV, clean column names, numeric coercion
+│   │   ├── schema.py            # sensor names, units, role = context | behavior
+│   │   └── windows.py           # batch windows (training) + streaming windows (Pi)
+│   ├── modes/
+│   │   ├── rules.py             # rule-based labeler (from original Blocks 33–36)
+│   │   ├── hysteresis.py        # causal debounce, no back-filling
+│   │   ├── thermal.py           # WARMING vs WARM
+│   │   └── discovery.py         # clustering experiments (Phase 3)
+│   ├── features/
+│   │   └── extract.py           # window -> feature vector (mean/std/... per sensor)
+│   ├── models/
+│   │   ├── baseline.py          # robust z-score / Mahalanobis per mode
+│   │   ├── autoencoder.py       # Keras model builder
+│   │   ├── numpy_forward.py     # dependency-free inference for the Pi
+│   │   └── registry.py          # mode -> model, threshold, feature list, min-data rule
+│   ├── training/
+│   │   ├── train_mode_models.py # trains all modes, saves artifacts
+│   │   └── calibrate.py         # per-mode thresholds
+│   ├── eval/
+│   │   ├── fault_injection.py   # synthetic faults
+│   │   ├── metrics.py           # per-mode detection rate, false alarms per hour
+│   │   └── report.py            # writes results tables/plots
+│   └── runtime/
+│       ├── obd_source.py        # ELM327 reader and CSV replay behind one interface
+│       ├── pipeline.py          # ties everything together, streaming
+│       ├── alerts.py            # k-of-n logic, coverage tracking
+│       └── export.py            # Keras -> LiteRT / NPZ weights
 ├── scripts/
-│   ├── inspect_adapter.py
-│   ├── collect_drive.py
-│   ├── replay_drive.py
-│   ├── run_pi.py
-│   └── benchmark_pi.py
-│
-├── models/
-│   └── .gitkeep
-│
-├── tests/
-│   ├── fixtures/
-│   ├── unit/
-│   └── integration/
-│
-├── deployment/
-│   ├── obd-anomaly.service
-│   └── install_pi.sh
-│
-└── outputs/
-    ├── plots/
-    ├── evaluation/
-    ├── benchmarks/
-    └── logs/
+│   ├── download_data.sh
+│   ├── train.py
+│   ├── evaluate.py
+│   └── run_replay.py
+├── artifacts/                   # saved models/scalers/thresholds (gitignored except manifest)
+└── tests/
+    ├── test_loader.py
+    ├── test_modes_rules.py
+    ├── test_windows.py
+    ├── test_parity_with_notebook.py
+    └── test_pipeline_replay.py
 ```
 
 ---
 
-# 2. Artifact Contracts
-
-Do not let scripts invent their own schemas. Define these contracts first in `src/obd_anomaly/schemas.py` and document them in `docs/data_dictionary.md`.
-
-## 2.1 Raw sample contract
-
-One row represents one acquisition cycle, not necessarily one simultaneous ECU snapshot.
-
-Required metadata:
-
-| Field | Meaning |
-|---|---|
-| SESSION_ID | unique drive/collection session |
-| TIMESTAMP_UTC | wall-clock timestamp |
-| MONOTONIC_SEC | monotonic elapsed time used for intervals |
-| VEHICLE_ID | pseudonymous vehicle identifier |
-| SOURCE | csv or bluetooth_obd |
-| CONNECTION_OK | adapter connection health |
-
-PID columns are nullable because support differs by vehicle.
-
-Recommended initial PID vocabulary:
-
-| Canonical field | Purpose | Initial importance |
-|---|---|---|
-| ENGINE_RPM | engine state + behavior | required for v1 |
-| VEHICLE_SPEED | motion state | required for v1 |
-| ENGINE_LOAD | power/load context | recommended |
-| THROTTLE_POSITION | driver/engine demand proxy | recommended |
-| COOLANT_TEMPERATURE | warm-up context | recommended |
-| MAF | airflow/load behavior | optional |
-| INTAKE_PRESSURE | load behavior | optional |
-| INTAKE_TEMPERATURE | environmental/context | optional |
-| SHORT_FUEL_TRIM_1 | fuel-control behavior | optional |
-| LONG_FUEL_TRIM_1 | fuel-control baseline | optional |
-| ENGINE_RUN_TIME | startup timing fallback | optional |
-
-Never assume every car supports every PID.
-
-## 2.2 Normalized sample contract
-
-Raw contract plus:
-
-- canonical numeric units
-- `SAMPLE_DT_SEC`
-- per-PID validity flags
-- per-PID age/staleness if polling asynchronously
-- `DATA_QUALITY_OK`
-- `QUALITY_FLAGS`
-
-## 2.3 Derived-signal contract
-
-Normalized sample plus:
-
-- `SPEED_SMOOTH_KMH`
-- `ACCELERATION_MPS2`
-- `RPM_DELTA_PER_SEC`
-- `LOAD_DELTA_PER_SEC` when load exists
-- `THROTTLE_DELTA_PER_SEC` when throttle exists
-- `SECONDS_SINCE_ENGINE_START`
-
-## 2.4 Mode-state contract
-
-| Field | Meaning |
-|---|---|
-| ENGINE_STATE | OFF/RUNNING/UNKNOWN |
-| THERMAL_STATE | STARTUP_WARMUP/WARM_OR_UNKNOWN |
-| MOTION_STATE_RAW | rule result before persistence |
-| MOTION_STATE | persisted stable state |
-| LOAD_STATE | LOW/MEDIUM/HIGH/UNKNOWN |
-| MODE_CONFIDENCE | 0-1 confidence/quality score |
-| MODE_REASON | machine-readable reason flags |
-| MODE_SEGMENT_ID | contiguous stable-mode segment |
-
-## 2.5 Feature-window contract
-
-| Field | Meaning |
-|---|---|
-| WINDOW_ID | unique identifier |
-| SESSION_ID | source session |
-| MODE_SEGMENT_ID | source stable segment |
-| MOTION_STATE | model-routing mode |
-| WINDOW_START_SEC | elapsed start |
-| WINDOW_END_SEC | elapsed end |
-| DURATION_SEC | actual duration |
-| SAMPLE_COUNT | rows used |
-| MIN_MODE_CONFIDENCE | weakest confidence in window |
-| QUALITY_FLAGS | window-level quality |
-| FEATURE_* | extracted numeric features |
-
-## 2.6 Anomaly-result contract
-
-| Field | Meaning |
-|---|---|
-| RESULT_TIME_UTC | decision time |
-| WINDOW_ID | scored window |
-| MOTION_STATE | routing mode |
-| MODE_CONFIDENCE | routing confidence |
-| STATUS | NORMAL / ANOMALOUS / UNSCORED |
-| ANOMALY_SCORE | model score |
-| THRESHOLD | threshold for this mode/model |
-| MODEL_VERSION | exact artifact version |
-| TOP_CONTRIBUTORS | explanation data if supported |
-| REASON | especially for UNSCORED |
+## 6. Phases and tasks
 
----
-
-# 3. Execution Rules
-
-1. Raw data is immutable. Never overwrite `data/raw/`.
-2. Generated datasets are reproducible from raw data + committed config.
-3. Train/calibration/test splits happen by **session**, not random rows.
-4. A mode is not considered supported until enough independent healthy sessions exist.
-5. A model never scores a window whose mode is uncertain or unsupported.
-6. Threshold calibration data is separate from model-fitting data.
-7. Test data remains untouched until model + threshold are frozen.
-8. Synthetic anomalies are only pipeline sanity tests; they are not evidence of real fault recall.
-9. Every training artifact stores the exact feature list, config hash/version, sessions used, threshold, and library versions.
-10. The Raspberry Pi performs inference only. Training stays on a development computer unless benchmarking later proves otherwise.
-
----
-
-# 4. Detailed Implementation Sequence
-
-## Step 00 — Create and verify the development environment
-
-**Goal:** make the empty starter repo reproducibly installable.
-
-**Why:** every later result is suspect if developers use different Python/dependency environments.
-
-**Inputs:** `requirements.txt`, `requirements-pi.txt`.
-
-**Files to modify:** `README.md`, optionally add `pyproject.toml` after deciding packaging style.
-
-**Implementation actions:**
-- Select one supported Python version for development and Pi.
-- Create `.venv`.
-- Install development dependencies.
-- Verify imports for numpy, pandas, yaml, sklearn, joblib, pytest.
-- On Pi only, verify `obd`/serial dependencies separately.
-
-**Outputs:** working local virtual environment; documented install commands.
-
-**Validation:** run a one-line import check and `pytest` even though the initial suite is empty.
-
-**Definition of done:** a second machine can clone the branch and reproduce the environment using only README instructions.
-
-**Next step consumes:** stable dependency environment.
-
----
-
-## Step 01 — Define canonical configuration loading
-
-**Goal:** all thresholds and paths come from config files rather than scattered constants.
-
-**Inputs:** files under `config/`.
-
-**Files to implement:** `src/obd_anomaly/config.py`.
-
-**Implementation actions:**
-- Create a typed configuration loader.
-- Resolve paths relative to repo root.
-- Validate required keys.
-- Fail with actionable messages for missing/invalid keys.
-- Add a config-version field.
-- Keep vehicle-specific overrides possible without changing source.
-
-**Outputs:** one configuration object used by training and runtime.
-
-**Tests:** `tests/unit/test_config.py` for missing file, malformed YAML, missing key, valid config.
-
-**Done:** no later module reads YAML directly.
-
-**Next:** schemas and PID definitions use the same config object.
-
----
-
-## Step 02 — Define data classes / schemas before writing processing code
-
-**Goal:** freeze interfaces between acquisition, preprocessing, mode detection, features, and scoring.
-
-**Inputs:** artifact contracts in Section 2.
-
-**Files to implement:** `src/obd_anomaly/schemas.py`, `docs/data_dictionary.md`.
-
-**Implementation actions:**
-- Define `OBDSample`.
-- Define `NormalizedSample`.
-- Define `ModeState`.
-- Define `FeatureWindow`.
-- Define `AnomalyResult`.
-- Decide whether internal batch processing uses dataclasses, DataFrames, or both.
-- Document nullable vs required fields and units.
-
-**Outputs:** importable schema definitions and human-readable data dictionary.
-
-**Tests:** construct valid/invalid examples.
-
-**Done:** every module in the plan can name its input/output type.
-
----
-
-## Step 03 — Define the PID registry
-
-**Goal:** separate "what we would like to read" from "what this vehicle actually supports."
-
-**Inputs:** generic OBD-II PID candidates.
-
-**Files to fill:** `config/pids.yaml`, `docs/data_dictionary.md`.
-
-**Implementation actions:**
-- List required, recommended, and optional PIDs.
-- For each PID store canonical name, python-OBD command name, target unit, expected type, polling priority.
-- Do not encode plausible-value anomaly limits yet; keep acquisition validation separate from anomaly learning.
-- Add aliases for historical CSV column names if existing datasets use different labels.
-
-**Output:** versioned PID registry.
-
-**Validation:** config loader can parse every entry and canonical names are unique.
-
-**Done:** live and CSV adapters can target the same canonical vocabulary.
-
----
-
-## Step 04 — Define raw drive metadata
-
-**Goal:** make every collection session traceable.
-
-**Inputs:** planned road tests.
-
-**Files to fill:** `docs/data_collection_protocol.md`.
-
-**Implementation actions:**
-- Define `SESSION_ID`, pseudonymous `VEHICLE_ID`, date/time, route label, cold/warm start, known DTCs, recent maintenance, weather notes, driver notes, adapter model.
-- Decide whether metadata lives in a sidecar JSON file or repeated CSV columns.
-- Never store unnecessary personal/location information.
-
-**Output:** documented session metadata schema.
-
-**Validation:** create one hand-written example metadata record.
-
-**Done:** every future raw file can be tied to a collection context.
-
----
-
-## Step 05 — Implement raw dataset inventory
-
-**Goal:** know what data exists before preprocessing or modeling.
-
-**Inputs:** `data/raw/**/*`.
-
-**File to implement:** `training/00_inventory_raw_data.py`.
-
-**Implementation actions:**
-- Recursively discover supported raw files.
-- Record file path, session ID, rows, columns, parse status, timestamp availability, duration estimate, missingness, min/max RPM, min/max speed.
-- Never silently skip a failed file.
-- Record parse errors in the inventory.
-
-**Output:** `data/inventory/dataset_inventory.csv`.
-
-**Validation:** number of inventory rows equals number of discovered raw sessions.
-
-**Done:** one table answers which sessions and PIDs are available.
-
----
-
-## Step 06 — Implement the CSV replay source adapter
-
-**Goal:** make offline files look like the future live source.
-
-**Inputs:** one raw CSV.
-
-**Files to implement:** `src/obd_anomaly/adapters/base.py`, `csv_source.py`.
-
-**Implementation actions:**
-- Define a source interface: open/start, read/iterate sample, close.
-- CSV source yields samples in timestamp order.
-- Preserve original raw values until normalization.
-- Support fast replay and optionally real-time replay later.
-
-**Output:** stream/iterator of `OBDSample`-compatible records.
-
-**Tests:** tiny fixture CSV with known order and nulls.
-
-**Done:** downstream pipeline code does not care whether input came from CSV or Bluetooth.
-
----
-
-## Step 07 — Normalize column names
-
-**Goal:** eliminate dataset-specific naming differences.
-
-**Inputs:** raw CSV samples and PID registry aliases.
-
-**File to implement:** `preprocessing/normalize.py`.
-
-**Implementation actions:**
-- Normalize case and punctuation.
-- Apply explicit alias map.
-- Detect collisions: two raw columns mapping to one canonical name must raise or be resolved explicitly.
-- Preserve unknown columns separately or pass them through without letting them become model features automatically.
-
-**Output:** canonical column names.
-
-**Tests:** RPM, rpm, ENGINE RPM, historical typo aliases.
-
-**Done:** downstream code only references canonical names.
-
----
-
-## Step 08 — Normalize units
-
-**Goal:** make values comparable across files and live acquisition.
-
-**Inputs:** canonical PID values + registry target units.
-
-**File:** `preprocessing/normalize.py`.
-
-**Implementation actions:**
-- Convert speed to km/h or chosen canonical unit.
-- Convert temperatures to Celsius.
-- Convert pressure/MAF consistently.
-- Store unit conventions in data dictionary.
-- Reject ambiguous unitless historical columns unless the source convention is known.
-
-**Output:** numeric canonical-unit columns.
-
-**Validation:** known conversion fixtures.
-
-**Done:** one canonical unit exists per sensor.
-
----
-
-## Step 09 — Build a trustworthy time base
-
-**Goal:** derive intervals from monotonic time rather than assuming one row equals one second.
-
-**Inputs:** MONOTONIC_SEC if collected live; otherwise TIMESTAMP or ENGINE_RUN_TIME fallback.
-
-**File:** `preprocessing/timebase.py`.
-
-**Implementation actions:**
-- Select source priority.
-- Compute elapsed session time.
-- Compute `SAMPLE_DT_SEC`.
-- Flag zero, negative, or very large gaps.
-- Never silently repair clock reversals without a quality flag.
-
-**Outputs:** elapsed time + interval + time quality flags.
-
-**Tests:** irregular sampling, duplicate timestamps, gap, clock reversal.
-
-**Done:** derivatives never use implicit row spacing.
-
----
-
-## Step 10 — Add sample-level data quality flags
-
-**Goal:** distinguish "weird vehicle behavior" from "bad/missing acquisition."
-
-**Inputs:** normalized sample.
-
-**File:** `preprocessing/quality.py`.
-
-**Implementation actions:**
-- Flag missing required PIDs.
-- Flag stale values.
-- Flag nonnumeric parse failures.
-- Flag connection interruptions.
-- Flag impossible acquisition metadata such as negative dt.
-- Keep quality checks conservative; do not turn learned anomaly rules into hard-coded plausibility rules.
-
-**Outputs:** `DATA_QUALITY_OK`, `QUALITY_FLAGS`.
-
-**Tests:** one fixture per flag.
-
-**Done:** anomaly model can abstain because data quality is bad.
-
----
-
-## Step 11 — Measure real sampling behavior
-
-**Goal:** stop assuming an OBD sampling rate.
-
-**Inputs:** several raw/live sessions.
-
-**Files:** add analysis to `training/00_inventory_raw_data.py`; document in `outputs/evaluation/sampling_report.csv`.
-
-**Implementation actions:**
-- Measure median/p5/p95 dt.
-- Measure effective update rate per PID.
-- Measure missing/stale fraction.
-- Compare rates when polling different PID counts.
-- Record adapter/car combination.
-
-**Output:** sampling report.
-
-**Done:** later smoothing/window policies are based on measured timing.
-
----
-
-## Step 12 — Implement speed smoothing
-
-**Goal:** reduce quantization/jitter before differentiation.
-
-**Inputs:** VEHICLE_SPEED + timestamps.
-
-**File:** `preprocessing/derived_signals.py`.
-
-**Implementation actions:**
-- Start with a short rolling median or another causal filter suitable for online use.
-- Keep raw speed.
-- Configure filter length in time/samples.
-- Do not use a centered future-looking filter in the live path.
-
-**Output:** `SPEED_SMOOTH_KMH`.
-
-**Tests:** constant speed with spikes; acceleration ramp.
-
-**Done:** smoothing suppresses isolated noise without erasing real transitions.
-
----
-
-## Step 13 — Derive acceleration robustly
-
-**Goal:** obtain the main signal for motion-state changes.
-
-**Inputs:** smoothed speed + actual dt.
-
-**File:** `derived_signals.py`.
-
-**Implementation actions:**
-- Convert speed to m/s.
-- Differentiate using actual elapsed time.
-- Guard tiny/invalid dt.
-- Optionally smooth the derivative separately.
-- Flag acceleration as invalid across large acquisition gaps.
-
-**Output:** `ACCELERATION_MPS2`.
-
-**Tests:** constant speed ≈ 0; increasing speed > 0; decreasing speed < 0.
-
-**Done:** no infinities and sign is correct.
-
----
-
-## Step 14 — Derive engine/load transient signals
-
-**Goal:** expose short-term changes without requiring a sequence model initially.
-
-**Inputs:** RPM, load, throttle when available.
-
-**File:** `derived_signals.py`.
-
-**Implementation actions:**
-- Compute per-second RPM delta.
-- Compute load/throttle deltas.
-- Respect actual dt.
-- Leave unavailable optional features null.
-
-**Outputs:** derivative columns.
-
-**Done:** derived features are deterministic offline and online.
-
----
-
-## Step 15 — Detect engine state
-
-**Goal:** establish the first hard routing gate.
-
-**Inputs:** RPM plus connection/quality state.
-
-**File:** `modes/engine_state.py`.
-
-**Implementation actions:**
-- Define OFF, RUNNING, UNKNOWN.
-- Configure an RPM threshold but test it against real vehicle data.
-- Do not treat adapter disconnect as engine off.
-- Add hysteresis if near-threshold noise exists.
-
-**Output:** ENGINE_STATE.
-
-**Tests:** off, cranking/ambiguous, running, disconnected.
-
-**Done:** scoring cannot occur while engine state is OFF/UNKNOWN.
-
----
-
-## Step 16 — Track seconds since engine start
-
-**Goal:** identify startup context.
-
-**Inputs:** engine-state transitions + monotonic time; optionally ENGINE_RUN_TIME.
-
-**File:** `modes/thermal_state.py`.
-
-**Implementation actions:**
-- Detect OFF/UNKNOWN -> RUNNING transition.
-- Start/reset timer.
-- Reconcile with ENGINE_RUN_TIME when available.
-- Define behavior when collection begins after engine is already running.
-
-**Output:** `SECONDS_SINCE_ENGINE_START`.
-
-**Done:** startup timer is reproducible in replay and live modes.
-
----
-
-## Step 17 — Implement startup/warm-up context v1
-
-**Goal:** prevent cold/start transient behavior from contaminating warm models.
-
-**Inputs:** seconds since start; coolant temperature if available.
-
-**File:** `modes/thermal_state.py`; config in `modes.yaml`.
-
-**Implementation actions:**
-- Start with a conservative time-based startup guard.
-- If coolant exists, record it as context but do not hard-code a universal warm threshold without vehicle data.
-- Define WARM_OR_UNKNOWN after startup guard.
-- Later evaluate whether coolant-based submodels improve results.
-
-**Output:** THERMAL_STATE.
-
-**Done:** startup samples are separable from steady operation.
-
----
-
-## Step 18 — Detect stopped vs moving
-
-**Goal:** establish robust idle eligibility.
-
-**Inputs:** speed, RPM, quality.
-
-**File:** `modes/motion_state.py`.
-
-**Implementation actions:**
-- Configure a small stopped-speed tolerance.
-- Require engine running for IDLE.
-- Decide how to treat creeping/stop-and-go traffic.
-- Keep UNKNOWN_TRANSITION for ambiguous cases.
-
-**Output:** raw IDLE/MOVING classification.
-
-**Tests:** engine off at 0 speed is not idle; running at 0 is idle candidate.
-
-**Done:** idle is not inferred from speed alone.
-
----
-
-## Step 19 — Detect acceleration, steady motion, and deceleration
-
-**Goal:** create the primary model-routing states.
-
-**Inputs:** moving state + acceleration.
-
-**File:** `motion_state.py`.
-
-**Implementation actions:**
-- Configure positive acceleration threshold.
-- Configure negative deceleration threshold.
-- Define steady band around zero.
-- Define stronger negative threshold for STRONG_DECEL.
-- Call it STRONG_DECEL, not BRAKING, unless a real brake signal exists.
-
-**Output:** MOTION_STATE_RAW.
-
-**Tests:** synthetic trajectories and real reviewed snippets.
-
-**Done:** each valid moving sample gets a preliminary state or UNKNOWN_TRANSITION.
-
----
-
-## Step 20 — Add load context
-
-**Goal:** distinguish low/medium/high engine demand without multiplying models yet.
-
-**Inputs:** ENGINE_LOAD, throttle, MAP/MAF if available.
-
-**File:** `modes/load_state.py`.
-
-**Implementation actions:**
-- Begin with ENGINE_LOAD-based bins only if that PID is reliable on the target car.
-- Otherwise emit UNKNOWN.
-- Treat thresholds as vehicle/config-specific.
-- Preserve continuous load as a model feature.
-
-**Output:** LOAD_STATE.
-
-**Done:** load context exists but does not force a separate model in v1.
-
----
-
-## Step 21 — Compose the context detector
-
-**Goal:** produce one coherent ModeState object.
-
-**Inputs:** engine, thermal, raw motion, load states.
-
-**File:** `modes/detector.py`.
-
-**Implementation actions:**
-- Define priority: bad quality/unknown engine -> abstain; engine off -> off; startup -> startup; otherwise motion state.
-- Produce reason codes.
-- Keep axes separately in output rather than collapsing all information into one string.
-
-**Output:** ModeState before persistence.
-
-**Done:** one function/class produces the full context record for every sample.
-
----
-
-## Step 22 — Add persistence/hysteresis
-
-**Goal:** prevent mode flapping near thresholds.
-
-**Inputs:** raw context stream.
-
-**File:** `modes/persistence.py`.
-
-**Implementation actions:**
-- Track current stable state, candidate state, candidate start time.
-- Require configurable dwell time before switching.
-- Allow immediate transitions for hard states such as engine off if appropriate.
-- Use time, not row count.
-
-**Output:** stable MOTION_STATE.
-
-**Tests:** noisy threshold crossings and genuine sustained transitions.
-
-**Done:** short noise spikes do not create new mode segments.
-
----
-
-## Step 23 — Compute mode confidence
-
-**Goal:** explicitly represent uncertainty.
-
-**Inputs:** data quality, distance from thresholds, optional PID availability, transition state.
-
-**File:** `modes/detector.py`.
-
-**Implementation actions:**
-- Define interpretable confidence components.
-- Lower confidence near decision boundaries.
-- Lower confidence when required derived signals are stale.
-- Configure minimum confidence for model scoring.
-
-**Output:** MODE_CONFIDENCE + MODE_REASON.
-
-**Done:** uncertain samples can be UNSCORED rather than misrouted.
-
----
-
-## Step 24 — Build stable mode segments
-
-**Goal:** create contiguous events from the persisted state stream.
-
-**Inputs:** stable ModeState sequence.
-
-**File:** `modes/segments.py`.
-
-**Implementation actions:**
-- Increment segment ID when routing mode changes.
-- Store start/end/duration/sample count.
-- Preserve session boundaries.
-- Never join segments across missing-data gaps automatically.
-
-**Outputs:** MODE_SEGMENT_ID in labeled samples; optional segment table.
-
-**Done:** every future window belongs to exactly one stable segment.
-
----
-
-## Step 25 — Label all raw sessions
-
-**Goal:** produce an inspectable dataset before training any anomaly model.
-
-**Inputs:** raw sessions + config.
-
-**File:** `training/02_label_modes.py`.
-
-**Outputs:** `data/labeled/<session>.parquet` or CSV, depending chosen format.
-
-**Implementation actions:**
-- Run normalization, timebase, quality, derived signals, mode detector, persistence, segmentation.
-- Preserve source session ID.
-- Save config/version metadata.
-
-**Validation:** labeled row count equals normalized row count.
-
-**Done:** every healthy drive can be inspected with mode labels.
-
----
-
-## Step 26 — Build mode coverage inventory
-
-**Goal:** know whether there is enough data per mode.
-
-**Inputs:** labeled sessions.
-
-**Files:** `training/03_build_mode_inventory.py`.
-
-**Output:** `data/inventory/mode_inventory.csv`.
-
-**Columns:** vehicle, session, mode, total seconds, sample count, segment count, median segment duration, optional PID coverage.
-
-**Done:** unsupported modes are identified before model training.
-
----
-
-## Step 27 — Create manual mode-review plots
-
-**Goal:** validate the rule detector visually against real driving.
-
-**Inputs:** labeled sessions.
-
-**Files:** add a plotting utility under training or scripts; output only under `outputs/plots/`.
-
-**Plots:** speed, acceleration, RPM, load/throttle, coolant, colored mode background, confidence.
-
-**Validation:** manually review representative idle, acceleration, cruise, decel, startup, stop-and-go.
-
-**Done:** obvious systematic mislabels are fixed before freezing v1 mode rules.
-
----
-
-## Step 28 — Tune mode thresholds from reviewed drives
-
-**Goal:** replace guessed thresholds with target-vehicle evidence.
-
-**Inputs:** review plots + labeled drives.
-
-**Files:** `config/modes.yaml`.
-
-**Implementation actions:**
-- Adjust acceleration/deceleration bands.
-- Adjust stopped tolerance.
-- Adjust persistence duration.
-- Document why each threshold changed.
-- Re-run Steps 25-27 after every change.
-
-**Output:** mode-detector config v1.
-
-**Done:** representative drives are acceptably segmented.
-
----
-
-## Step 29 — Freeze mode-detector v1 and write tests from real snippets
-
-**Goal:** stop moving the routing target while anomaly models are built.
-
-**Inputs:** reviewed labeled data.
-
-**Files:** `tests/fixtures/mode_snippets/`, unit/integration mode tests.
-
-**Implementation actions:**
-- Extract small de-identified snippets for each state.
-- Store expected mode intervals.
-- Add regression tests.
-
-**Done:** later refactors cannot silently change mode labels.
-
----
-
-## Step 30 — Define per-mode window policy
-
-**Goal:** choose windows that match mode duration.
-
-**Inputs:** segment-duration statistics.
-
-**Files:** `config/windows.yaml`, `docs/mode_taxonomy.md`.
-
-**Implementation actions:**
-- Do not default every mode to 30 seconds.
-- Idle/cruise may use longer windows.
-- Accel/decel need shorter/event-sized windows.
-- Define stride/overlap policy.
-- Define minimum samples and max gap.
-- Define whether partial final windows are discarded.
-
-**Output:** explicit window policy per mode.
-
-**Done:** each policy is justified by observed segment durations.
-
----
-
-## Step 31 — Implement the online ring buffer
-
-**Goal:** support the same window construction on Pi.
-
-**Inputs:** normalized labeled samples.
-
-**File:** `features/buffer.py`.
-
-**Implementation actions:**
-- Keep bounded history by time.
-- Reset/partition on session or hard connection gap.
-- Expose samples for current stable segment.
-- Avoid unbounded memory growth.
-
-**Output:** reusable buffer object.
+Each checkbox is meant to become a GitHub issue. "Done when" is the acceptance test.
 
-**Tests:** append, trim, reset, gap handling.
+### Phase 0 — Repo bootstrap and refactor
 
-**Done:** longest configured window fits while memory stays bounded.
+Goal: the existing idle detector runs from a normal repo, produces the same numbers as the notebook, and saves its artifacts.
 
----
-
-## Step 32 — Implement pure-mode window extraction
-
-**Goal:** ensure a training/scoring window never mixes incompatible modes.
-
-**Inputs:** one stable segment + window policy.
-
-**File:** `features/windows.py`.
-
-**Implementation actions:**
-- Require one MODE_SEGMENT_ID.
-- Require minimum mode confidence.
-- Require data quality.
-- Enforce duration/sample count.
-- Reject windows crossing gaps.
-- Assign WINDOW_ID deterministically.
-
-**Output:** raw FeatureWindow candidates.
-
-**Tests:** boundary-crossing window rejected.
-
-**Done:** every accepted window is mode-pure.
-
----
-
-## Step 33 — Define the feature schema
-
-**Goal:** explicitly choose features before fitting models.
-
-**Inputs:** available PIDs and derived signals.
-
-**Files:** `config/models.yaml`, `docs/data_dictionary.md`.
-
-**Initial candidate statistics:** mean, standard deviation, min, max, range, first-last delta, slope where meaningful.
-
-**Implementation actions:**
-- Start small.
-- Avoid redundant features automatically added without review.
-- Decide mode-specific sensor lists.
-- Record required vs optional model features.
-
-**Output:** versioned feature schema.
-
-**Done:** exact feature names can be generated before any model is trained.
-
----
-
-## Step 34 — Implement feature extraction
-
-**Goal:** make training and runtime use identical feature code.
-
-**Inputs:** accepted raw window.
-
-**File:** `features/extract.py`.
-
-**Implementation actions:**
-- Compute configured statistics.
-- Use stable feature naming.
-- Handle nulls according to an explicit policy.
-- Do not silently impute with global means unless that policy is validated.
-- Return quality metadata with feature vector.
-
-**Output:** feature row.
-
-**Tests:** hand-calculated fixture.
-
-**Done:** same input window produces byte-for-byte equivalent feature names/order offline and online.
-
----
-
-## Step 35 — Build the full window dataset
-
-**Goal:** create the modeling table.
-
-**Inputs:** `data/labeled/*`.
-
-**File:** `training/04_build_windows.py`.
-
-**Outputs:** `data/windows/windows.parquet` plus summary CSV.
-
-**Required metadata:** session, vehicle, mode, segment, times, sample count, confidence, feature-schema version.
-
-**Done:** dataset can be regenerated from raw files.
-
----
-
-## Step 36 — Create session-level train/calibration/test manifests
-
-**Goal:** prevent leakage.
-
-**Inputs:** window dataset and session metadata.
-
-**File:** `training/05_make_splits.py`.
-
-**Outputs:** `data/manifests/train.csv`, `calibration.csv`, `test.csv`.
-
-**Implementation actions:**
-- Split whole sessions.
-- If multiple vehicles exist, decide whether evaluation is within-vehicle or cross-vehicle and document it.
-- Keep test sessions untouched.
-- Store random seed if randomized.
-
-**Validation:** set intersections are empty.
-
-**Done:** every window maps to exactly one split.
-
----
-
-## Step 37 — Fit per-mode preprocessing/scalers
-
-**Goal:** prevent one mode's scale from defining another mode's normality.
-
-**Inputs:** training manifest + training windows.
-
-**File:** `training/06_fit_scalers.py`.
-
-**Outputs:** `models/<mode>/<version>/scaler.joblib`, feature list metadata.
-
-**Implementation actions:**
-- Fit only on training sessions.
-- Remove/flag constant features using training data only.
-- Persist exact ordered feature list.
-
-**Done:** calibration/test data never influence scaler parameters.
-
----
-
-## Step 38 — Train a simple baseline before an autoencoder
-
-**Goal:** establish a lightweight reference model.
-
-**Inputs:** scaled healthy training windows per mode.
-
-**File:** `training/07_train_baselines.py`.
-
-**Initial candidate:** Isolation Forest. Optionally compare robust covariance/one-class methods where sample size permits.
-
-**Outputs:** model artifact + training metadata per mode.
-
-**Why:** if a simple detector performs adequately, it is easier to debug and cheaper on Pi; a neural model should earn its complexity.
-
-**Done:** every supported mode has at least one baseline model.
-
----
-
-## Step 39 — Add an autoencoder only as a comparison candidate
-
-**Goal:** test whether reconstruction modeling improves results.
-
-**Inputs:** same split and feature schema as baseline.
-
-**Files:** add a separate training module only when baseline pipeline is stable.
-
-**Implementation actions:**
-- Never change test set to favor the AE.
-- Use a separate validation subset for training/early stopping; do not reuse threshold-calibration data for early stopping.
-- Compare latency/memory and false-positive behavior.
-
-**Output:** optional candidate artifact.
-
-**Done:** AE is retained only if evaluation justifies it.
-
----
-
-## Step 40 — Calibrate thresholds separately per mode
-
-**Goal:** convert continuous scores into decisions.
-
-**Inputs:** frozen model + held-out healthy calibration sessions for that mode.
-
-**File:** `training/08_calibrate_thresholds.py`.
-
-**Implementation actions:**
-- Compute anomaly scores.
-- Choose target healthy false-positive policy.
-- Estimate threshold from calibration data only.
-- Report confidence/uncertainty when calibration sample size is small.
-- Never use one global threshold across modes unless evidence supports it.
-
-**Output:** threshold + calibration summary in model metadata.
-
-**Done:** each model bundle contains its own decision threshold.
-
----
-
-## Step 41 — Evaluate untouched healthy test sessions
-
-**Goal:** quantify nuisance-alert behavior.
-
-**Inputs:** frozen model/scaler/threshold + test manifest.
-
-**File:** `training/09_evaluate_healthy.py`.
-
-**Metrics:** window-level FPR, anomalies/hour, anomalies/drive, score distribution by mode, unscored fraction.
-
-**Output:** `outputs/evaluation/healthy_test_summary.csv`.
-
-**Done:** test results are generated without fitting/tuning.
-
----
-
-## Step 42 — Evaluate mode detector separately from anomaly detector
-
-**Goal:** avoid blaming anomaly models for routing errors.
-
-**Inputs:** manually reviewed mode intervals.
-
-**Outputs:** mode confusion table, transition timing error, unknown/unscored rate.
-
-**Files:** `docs/validation_protocol.md` and evaluation script.
-
-**Done:** mode quality has its own acceptance criteria.
-
----
-
-## Step 43 — Add synthetic anomaly sanity tests
-
-**Goal:** verify the pipeline reacts to obvious perturbations.
-
-**Inputs:** copies of healthy windows.
-
-**Perturbations:** unrealistic sensor offsets, frozen sensor, abrupt drift, isolated spikes, cross-sensor inconsistency.
-
-**Important:** do not report this as real fault-detection accuracy.
-
-**Output:** sanity-test report.
-
-**Done:** severe injected abnormalities move scores in the expected direction.
-
----
-
-## Step 44 — Define model-bundle metadata and registry
-
-**Goal:** make deployment deterministic.
-
-**Inputs:** scaler, model, threshold, feature schema.
-
-**Files:** `anomaly/registry.py`, `training/10_export_registry.py`.
-
-**Per-mode metadata must include:** mode, version, training date, feature order, window policy version, scaler file, model file, threshold, score direction, train/cal/test session IDs or manifest hash, library versions.
-
-**Output:** `models/registry.json`.
-
-**Done:** runtime can load a model using only the detected mode and registry.
-
----
-
-## Step 45 — Implement anomaly scorer
-
-**Goal:** return one consistent result contract.
-
-**Inputs:** FeatureWindow + ModelRegistry.
-
-**File:** `anomaly/scorer.py`.
-
-**Implementation actions:**
-- Verify supported mode.
-- Verify feature schema/version.
-- Verify required features.
-- Apply correct scaler/model.
-- Compare score to correct threshold.
-- Return UNSCORED with reason instead of throwing for expected unsupported conditions.
-
-**Output:** AnomalyResult.
+- [ ] Create the repo structure from Section 5 and commit the original script under `notebooks/`.
+- [ ] Add `configs/default.yaml`, `requirements-*.txt`, `.gitignore` (full contents in Section 9).
+- [ ] Move data loading (original Blocks 3–4) into `data/loader.py`; remove Colab-only code (`/content`, `display`).
+- [ ] Move windowing (Blocks 5–9) into `data/windows.py` and feature extraction into `features/extract.py`.
+- [ ] Move mode code (Blocks 30–36) into `modes/rules.py` and `modes/hysteresis.py`; read all thresholds from config.
+- [ ] Save the trained model, scaler (mean and scale as JSON), threshold, `model_features`, and `required_raw_sensors` to `artifacts/`.
+- [ ] Write `test_parity_with_notebook.py`: same window count, same feature count, same threshold (within tolerance) as the notebook.
 
-**Tests:** normal score, anomalous score, missing model, missing feature, low confidence.
+**Done when:** `python scripts/train.py --mode IDLE` and `python scripts/run_replay.py --file idle47.csv` reproduce the notebook's output, and no step depends on Colab.
 
-**Done:** scorer never silently routes to a different mode's model.
+### Phase 1 — Data understanding and schema
 
----
-
-## Step 46 — Add explanation/contributor output
-
-**Goal:** make alerts debuggable without pretending to diagnose a component.
-
-**Inputs:** scored feature vector.
-
-**File:** `anomaly/explain.py`.
-
-**Implementation actions:**
-- For models that support interpretable feature contributions, report them.
-- Otherwise report standardized feature deviations or reconstruction errors as diagnostic context.
-- Label these as contributors, not root causes.
-
-**Output:** TOP_CONTRIBUTORS.
-
-**Done:** an alert can say which measurements/features were unusual.
-
----
-
-## Step 47 — Merge adjacent anomalous windows into events
-
-**Goal:** avoid flooding logs with one alert per overlapping window.
-
-**Inputs:** AnomalyResult stream.
-
-**File:** `anomaly/events.py`.
-
-**Implementation actions:**
-- Define event start/end.
-- Merge nearby anomalous windows in same mode.
-- Track peak score and contributing features.
-- Close event after configurable normal gap or mode change.
-
-**Output:** anomaly-event records.
-
-**Done:** evaluation can report events/drive, not only windows.
-
----
-
-## Step 48 — Implement offline full-drive replay
-
-**Goal:** run the exact intended pipeline without a car.
-
-**Inputs:** raw drive + frozen registry.
-
-**File:** `scripts/replay_drive.py`, orchestrator in `pipeline.py`.
-
-**Outputs:** labeled sample file, window/result file, event file.
-
-**Validation:** no training code is imported by replay runtime.
-
-**Done:** one command reproduces an end-to-end drive analysis.
-
----
-
-## Step 49 — Implement Bluetooth OBD adapter inspection
-
-**Goal:** verify hardware before live collection.
-
-**Inputs:** paired adapter and running vehicle/ignition state.
-
-**File:** `scripts/inspect_adapter.py`, `adapters/bluetooth_obd_source.py`.
-
-**Implementation actions:**
-- Connect through configured serial/RFCOMM device.
-- Report adapter/connection status.
-- Enumerate supported configured PIDs.
-- Measure query latency.
-- Do not assume all configured PIDs are supported.
-
-**Output:** console/report of capability and timing.
-
-**Done:** target vehicle's usable PID set is known.
-
----
-
-## Step 50 — Implement live Bluetooth sample source
-
-**Goal:** produce the same OBDSample contract as CSV replay.
-
-**Input:** python-OBD/serial connection.
-
-**File:** `bluetooth_obd_source.py`.
-
-**Implementation actions:**
-- Query only supported PIDs.
-- Attach monotonic and wall timestamps.
-- Track per-PID age.
-- Handle null OBD responses.
-- Keep acquisition logic separate from preprocessing.
-
-**Output:** live OBDSample stream.
-
-**Done:** CSV and Bluetooth sources can feed the same pipeline.
-
----
-
-## Step 51 — Implement drive collection command
-
-**Goal:** build the project's own healthy dataset.
-
-**Input:** live source.
-
-**File:** `scripts/collect_drive.py`.
-
-**Outputs:** immutable raw session + metadata sidecar.
-
-**Implementation actions:**
-- Write incrementally so power loss does not erase the whole drive.
-- Flush periodically.
-- Record connection errors.
-- Never run anomaly training inside collection.
-
-**Done:** repeated road tests produce consistent raw artifacts.
-
----
-
-## Step 52 — Implement reconnect/backoff behavior
-
-**Goal:** survive temporary Bluetooth/adapter failures.
-
-**Inputs:** live source errors.
-
-**Files:** `bluetooth_obd_source.py`, `pipeline.py`.
-
-**Implementation actions:**
-- Close broken connection.
-- Mark gap/quality state.
-- Retry with bounded backoff.
-- Reset buffers if gap invalidates windows.
-- Never interpret disconnect as a vehicle anomaly.
-
-**Done:** unplug/replug or temporary loss does not corrupt mode/anomaly state.
-
----
-
-## Step 53 — Implement live Pi pipeline
+Goal: know exactly what is in every file type before modeling more modes.
 
-**Goal:** run collection -> preprocessing -> mode -> window -> scoring continuously.
+- [ ] Load all five file groups (`idle`, `drive`, `live`, `ufpe`, `long`); print rows, duration, and columns per file.
+- [ ] Measure the actual sample rate per file (rows per second; how often `ENGINE_RUN_TIME` changes).
+- [ ] Record missing-value rate and constant columns per file group.
+- [ ] Decide each column's role (**context** or **behavior**) and write it into `data/schema.py` with units.
+- [ ] Look at coolant temperature over time to pick the `WARMING`/`WARM` cutoff; write the value into config.
+- [ ] Check whether ENGINE_RUN_TIME ever resets or jumps inside a file (affects windowing and session logic).
+- [ ] Note whether the car is manual or automatic (affects the gear sub-mode idea).
 
-**File:** `scripts/run_pi.py`.
+**Done when:** `docs/data-summary.md` exists with per-group tables, and `schema.py` lists every sensor with a role.
 
-**Inputs:** runtime config + model registry + live source.
+### Phase 2 — Mode detection v1 (rules) and validation
 
-**Outputs:** JSONL/CSV structured results and events under `outputs/logs/` or configured persistent path.
+Goal: a fast, causal, tested mode labeler.
 
-**Implementation actions:**
-- Keep memory bounded.
-- Score only completed eligible windows.
-- Log UNSCORED reasons.
-- Never block acquisition on expensive reporting.
+- [ ] Vectorize `assign_modes` (no `iterrows`), then build the streaming version that processes one sample at a time.
+- [ ] Remove back-filling from the debounce; measure how much latency this adds.
+- [ ] Add throttle and RPM as optional inputs so acceleration is not decided from speed alone.
+- [ ] Add the `WARMING`/`WARM` axis.
+- [ ] Sanity-check label distributions per file group (`idle` files mostly `IDLE`; `ufpe` mostly low-speed; `drive` mostly `CRUISING`).
+- [ ] Measure label chatter: mode changes per minute and fraction of segments shorter than `persist_s`.
+- [ ] Sweep `accel_threshold` (e.g., 0.10, 0.15, 0.20 m/s²) and pick with evidence.
+- [ ] Hand-label a small set of segments (a few minutes from each file group) to compute a real confusion matrix.
 
-**Done:** road test produces timestamped mode and anomaly results.
+**Done when:** batch and streaming labelers give identical labels on the same file (apart from documented startup differences), chatter is below the target in config, and a confusion matrix against hand labels is in `docs/`.
 
----
-
-## Step 54 — Benchmark on the actual Raspberry Pi
-
-**Goal:** prove the runtime fits device limits.
-
-**File:** `scripts/benchmark_pi.py`.
-
-**Metrics:** CPU %, RSS memory, acquisition latency, preprocessing latency, scoring latency, log growth, missed query rate.
-
-**Output:** `outputs/benchmarks/pi_benchmark.json`.
-
-**Done:** runtime keeps up with measured acquisition rate with comfortable headroom.
-
----
-
-## Step 55 — Add log rotation and storage limits
-
-**Goal:** prevent filling the Pi filesystem.
-
-**Inputs:** expected daily log volume.
-
-**Files:** runtime config + deployment/logging setup.
-
-**Implementation actions:**
-- Define max file size/age/count.
-- Separate raw collection from compact anomaly event logs.
-- Document retention.
-
-**Done:** unattended operation has bounded storage use.
-
----
-
-## Step 56 — Install as a systemd service
-
-**Goal:** start automatically after boot and recover from process failure.
-
-**Files:** `deployment/obd-anomaly.service`, `deployment/install_pi.sh`.
-
-**Implementation actions:**
-- Run as non-root user where possible.
-- Depend on Bluetooth/network only as actually required.
-- Configure working directory and environment.
-- Restart on failure with delay.
-- Send logs to chosen destination.
-
-**Done:** reboot -> service starts -> adapter reconnects -> pipeline resumes.
-
----
-
-## Step 57 — Run boot/recovery tests
-
-**Goal:** test failure modes before normal road use.
-
-**Scenarios:** Pi reboot, adapter absent at boot, adapter appears later, ignition off/on, temporary Bluetooth loss, corrupted model registry, missing optional PID, low disk space.
-
-**Output:** `docs/validation_protocol.md` checklist/results.
-
-**Done:** expected failures become UNSCORED/retry states rather than crashes or false alerts.
-
----
-
-## Step 58 — Define the real-fault data protocol
+### Phase 3 — Mode discovery (find the modes we do not know about)
 
-**Goal:** create evidence for actual fault detection.
+Goal: use data, not guesses, to decide the final mode list.
 
-**Files:** `docs/data_collection_protocol.md`, `docs/validation_protocol.md`.
+- [ ] Build a context feature table (speed, acceleration, RPM, throttle, coolant, RPM÷speed).
+- [ ] Draw the speed × acceleration occupancy map (how much time is spent in each cell) for each file group.
+- [ ] Cluster context features (start with k-means and a Gaussian mixture; try a density-based method if clusters are uneven). Vary k and check stability across recordings.
+- [ ] Compare clusters to the rule-based labels. Where clusters split a rule mode, look at what separates them (throttle? RPM/speed ratio? load?).
+- [ ] For each candidate sub-mode, check that behavior sensors really differ between sub-modes (otherwise keep the coarser mode).
+- [ ] Write `docs/research-modes.md`: final taxonomy, thresholds, and evidence.
 
-**Record when available:** DTCs, technician diagnosis, repair performed, pre/post-repair drives, symptom timing, vehicle condition.
+**Done when:** a final mode list v2 is agreed, each mode has a definition that can be computed causally on the Pi, and the amount of training data per mode is tabulated.
 
-**Important:** do not intentionally create unsafe mechanical faults.
+### Phase 4 — Per-mode anomaly models
 
-**Done:** real fault sessions can be labeled at event/session level.
+Goal: a model (or an explicit "unchecked" rule) for every mode.
 
----
-
-## Step 59 — Evaluate real fault data
-
-**Goal:** measure whether the system detects meaningful abnormalities.
-
-**Inputs:** frozen model version + labeled fault sessions.
-
-**Metrics:** event recall, precision, false alerts/hour, detection delay, mode at detection, pre/post-repair score shift.
-
-**Output:** versioned fault evaluation report.
-
-**Done:** project claims are limited to what this evidence supports.
-
----
-
-## Step 60 — Decide whether the architecture needs a learned mode classifier
-
-**Goal:** only add ML routing if deterministic routing is a demonstrated bottleneck.
-
-**Inputs:** mode confusion/errors from Step 42.
-
-**Candidate:** supervised classifier using speed, acceleration, RPM, load, throttle and short history.
-
-**Acceptance rule:** learned router must improve reviewed mode accuracy without unacceptable Pi cost or loss of debuggability.
-
-**Done:** either retain deterministic v1 or document evidence for classifier v2.
-
----
-
-## Step 61 — Decide whether load/thermal submodels are justified
-
-**Goal:** address hills/high load/cold operation without unnecessary model explosion.
-
-**Inputs:** healthy false positives grouped by load and coolant/start context.
-
-**Implementation decision:**
-- If errors cluster strongly by context and enough data exists, split a mode into submodels.
-- Otherwise keep context as features.
-
-**Done:** submodels are data-driven, not speculative.
-
----
+- [ ] Choose window length per mode (idle can stay 30 s; transient modes probably need ~5–10 s or should use the whole mode segment). Store in config.
+- [ ] Split **by recording and by time-block** so train / calibration / test do not share sessions, and report how sensitive results are to the split.
+- [ ] Build the per-mode baseline (robust z-score / Mahalanobis).
+- [ ] Build per-mode autoencoders (Option A). Keep architectures small.
+- [ ] Build the conditional autoencoder (Option B) for comparison.
+- [ ] Replace the single mean-MSE score with per-feature errors plus a summary (max, top-k mean); compare on injected faults.
+- [ ] Thresholds from a held-out calibration set with a minimum window count; below the minimum, the mode is `UNCHECKED` or uses a conservative baseline threshold.
+- [ ] Add a per-mode "insufficient data" report.
 
-## Step 62 — Compare advanced anomaly models
+**Done when:** `scripts/train.py` trains all modes from config, saves artifacts plus a manifest (data hash, config hash, git commit), and `registry.py` returns a model or an explicit `UNCHECKED` for every mode.
 
-**Goal:** improve detection only after the baseline is measurable.
+### Phase 5 — Evaluation
 
-**Candidates:** one-class methods, autoencoder, temporal autoencoder, lightweight sequence model, conditional model/mixture of experts.
+Goal: real evidence that the system works, mode by mode. Details in Section 7.
 
-**Inputs:** same immutable split manifests.
+- [ ] Implement the fault injector.
+- [ ] Run the four-way comparison (idle-only, one global model, per-mode, conditional).
+- [ ] Report false alarms per hour of healthy driving, per mode and overall.
+- [ ] Report detection rate and detection delay per fault type, per mode.
+- [ ] Write `docs/evaluation.md`.
 
-**Compare:** healthy FPR, real-fault recall when available, latency, memory, calibration stability, explanation quality.
+**Done when:** results tables exist for every mode and the team has agreed on the model to ship.
 
-**Done:** replacement model must beat baseline on agreed metrics, not merely training loss.
+### Phase 6 — Raspberry Pi runtime
 
----
-
-# 5. Mode Detector v1 Acceptance Matrix
-
-Before anomaly training starts, the following must be manually reviewed:
-
-| Scenario | Expected routing behavior |
-|---|---|
-| engine off, speed 0 | ENGINE_OFF, UNSCORED |
-| engine just started | STARTUP_WARMUP, initially UNSCORED |
-| warm engine, stopped | IDLE |
-| speed increasing clearly | ACCELERATING |
-| steady speed within tolerance | CRUISING |
-| moderate negative acceleration | COASTING_DECEL |
-| strong negative acceleration | STRONG_DECEL |
-| noisy boundary crossing | stable prior mode until persistence requirement met |
-| missing speed | UNKNOWN_TRANSITION / UNSCORED |
-| Bluetooth gap | bad quality / UNSCORED, not anomaly |
-| unsupported model mode | UNSCORED |
-| low mode confidence | UNSCORED |
-
----
+Goal: the chosen model runs live on the Pi within budget. Details in Section 8.
 
-# 6. Minimum Dataset Before Trusting a Mode Model
+- [ ] Implement `obd_source.py` with two backends behind one interface: CSV replay and ELM327.
+- [ ] Implement `pipeline.py` (streaming) and `alerts.py` (k-of-n, coverage).
+- [ ] Export weights to a NumPy file and/or LiteRT (`runtime/export.py`); implement `numpy_forward.py`; test that outputs match Keras within tolerance.
+- [ ] Replay every test file through the Pi pipeline and confirm the results match the offline evaluation.
+- [ ] Benchmark CPU, memory, and per-sample latency on the actual Pi model.
+- [ ] Run live in the car with logging only (no alerts shown) for several trips.
 
-Do not define a universal number here without inspecting actual window diversity. Instead enforce these gates:
+**Done when:** replay results equal offline results, benchmarks are inside budget, and at least a few live trips are logged.
 
-1. multiple independent sessions, not one long drive;
-2. multiple distinct segments for the mode;
-3. enough duration to produce a meaningful calibration set and untouched test set;
-4. representative operating conditions for the target use;
-5. no known unresolved mechanical fault in "healthy" training sessions;
-6. sufficient PID completeness for the chosen feature schema.
+### Phase 7 — Hardening
 
-If a mode fails these gates, the registry must mark it unsupported.
+- [ ] Alert logic tuning using live logs.
+- [ ] Handle dropped OBD frames, sensors that return no data, and reconnects.
+- [ ] Drift monitoring (per-mode score distribution over time) and a documented retraining procedure.
+- [ ] Decide what happens when a new vehicle is connected (separate calibration run?).
 
 ---
 
-# 7. Evaluation Rules
+## 7. Evaluation plan
 
-## 7.1 Mode detection metrics
+The carOBD data is recorded from a healthy vehicle, and we found no labeled fault data in the repository description, so we must create test anomalies.
 
-- manually reviewed interval accuracy
-- confusion matrix
-- transition delay
-- fraction UNKNOWN/UNSCORED
-- mode-segment fragmentation
+**Metrics**
+- False alarms per hour of healthy driving (overall and per mode) — using held-out recordings.
+- Detection rate and time-to-detect per fault type and per mode.
+- Coverage: fraction of driving time that was checked (not `UNCHECKED`).
+- Mode labeler: confusion matrix against hand labels, and chatter rate.
 
-## 7.2 Healthy anomaly metrics
+**Fault catalogue (`eval/fault_injection.py`)** — inject into healthy recordings, ideally keeping physical relationships (e.g., a coolant fault should not also change RPM):
+- Stuck value (sensor freezes)
+- Offset / bias (e.g., coolant reads +15 °C, fuel trim biased)
+- Gain error (scale wrong)
+- Slow drift
+- Spikes / dropouts
+- Slow response (a sensor that lags the true change)
+- Cross-sensor inconsistency (e.g., MAF vs. MAP vs. RPM relationship broken)
 
-- false-positive windows / total windows
-- anomaly events per hour
-- anomaly events per drive
-- false positives by mode
-- false positives by load/thermal context
-- unscored fraction
+**Comparisons (ablation)**
+1. Idle model only (current code)
+2. One global model, no modes
+3. Per-mode models (Option A)
+4. Conditional autoencoder (Option B)
+5. Baselines (robust z-score / Mahalanobis per mode) alongside each
 
-## 7.3 Fault metrics when real labels exist
+**Motivating experiment (do this first):** run the current idle model on driving windows and record the false-alarm rate. This is the number that proves mode-awareness is needed.
 
-- event recall
-- precision
-- detection delay
-- pre/post-repair score comparison
-- mode-specific detection behavior
+**Suggested targets (proposals for the team to accept or change)**
+- False alarms: ≤ 1 per hour of healthy driving after the k-of-n rule.
+- Detection: agree on a minimum fault size per sensor (e.g., a specified coolant offset) and require detection within a stated number of windows.
 
-## 7.4 Pi runtime metrics
-
-- acquisition update rate
-- PID staleness
-- CPU
-- memory
-- score latency
-- dropped/failed queries
-- log growth
-
 ---
 
-# 8. Research / Design Notes to Preserve
+## 8. Raspberry Pi runtime plan
 
-- Generic OBD PID support varies by vehicle; runtime must discover support instead of assuming all configured sensors exist.
-- Bluetooth OBD adapters on Linux commonly appear through a serial/RFCOMM path; the exact connection procedure and channel can vary by adapter.
-- Actual polling throughput depends on adapter, vehicle protocol, number of PIDs, ECU response time, and software; measure it on the target car rather than assuming a fixed sample rate.
-- EPA MOVES uses operating-mode concepts based on vehicle speed and power-demand-related quantities. That is useful inspiration for context-aware behavior, but MOVES emissions bins should not be copied directly as anomaly classes.
-- Generic speed deceleration alone does not establish that the driver pressed the brake pedal. Use STRONG_DECEL unless an actual brake signal is available.
-- Isolation Forest is a sensible baseline because it provides an unsupervised anomaly score and is lightweight, but it is a baseline to evaluate, not a predetermined final answer.
-
-Reference reading:
-- python-OBD project/docs: https://github.com/brendan-w/python-OBD
-- BlueZ RFCOMM documentation: https://github.com/bluez/bluez/wiki/rfcomm
-- scikit-learn outlier detection / Isolation Forest: https://scikit-learn.org/stable/modules/outlier_detection.html
-- EPA MOVES / Vehicle Specific Power: https://www.epa.gov/moves/what-vehicle-specific-power-vsp
-
----
+**Which Pi?** Not yet decided (see Section 10). A Pi Zero W is what the original dataset author used for OBD reading, alongside an ELM327 Bluetooth adapter. Newer boards have far more headroom.
 
-# 9. Definition of Project Completion
-
-The project is not "done" because a model trains.
-
-Version 1 is complete when all of the following are true:
-
-- a fresh Pi can be installed from documentation;
-- the Pi connects to the target Bluetooth OBD adapter;
-- supported PIDs are discovered and logged;
-- raw sessions are timestamped and reproducible;
-- mode labels are manually validated;
-- windows never cross incompatible mode segments;
-- train/calibration/test sessions are disjoint;
-- every supported mode has a versioned model bundle and threshold;
-- unsupported/uncertain states abstain;
-- offline replay and live inference use the same preprocessing/feature/scoring code;
-- healthy false-positive behavior is measured on untouched drives;
-- Pi CPU/memory/latency are measured;
-- reconnect/reboot/missing-PID behavior is tested;
-- real-fault performance claims are made only when real labeled fault evidence exists;
-- README and docs allow another developer to reproduce the system without the original author.
+**Keep the runtime light**
+- The current network has about 2,300 parameters. A forward pass in plain NumPy is cheap, so **the Pi does not need TensorFlow**. Train on a laptop or Colab; ship weights and scaler statistics as JSON/NPZ.
+- If a runtime is preferred, Google's LiteRT is the successor to TensorFlow Lite, and the Python package is `ai-edge-litert` (replacing `tflite-runtime`). Check that a wheel exists for your Pi's OS and architecture; if not, use the NumPy forward pass.
+- Estimated time per scoring step should be measured, not assumed; add a benchmark script in Phase 6.
+
+**Budgets (proposals — measure, then adjust)**
+- Per-sample processing well under the OBD polling interval.
+- Memory: comfortably inside the board's RAM alongside Raspberry Pi OS.
+- Detection delay: one window length plus `persist` logic; state it explicitly in the docs.
+
+**Data rate**
+OBD-II polling over ELM327 limits how many PIDs you can read per second. Measure the real rate on the car; the whole time axis, mode thresholds, and window lengths depend on it.
+
+**Replay first.** Every feature must work on `run_replay.py` (CSV in, decisions out) before touching the car, so bugs are caught at a desk.
+
+---
+
+## 9. Bootstrap: exact steps and full config files
+
+### 9.1 Steps
+
+```bash
+# 1. Create the repo
+mkdir obd-anomaly && cd obd-anomaly
+git init
+
+# 2. Create folders
+mkdir -p configs docs notebooks scripts artifacts tests data
+mkdir -p src/obdanom/{data,modes,features,models,training,eval,runtime}
+touch src/obdanom/__init__.py
+touch src/obdanom/{data,modes,features,models,training,eval,runtime}/__init__.py
+
+# 3. Python environment (training machine)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements-train.txt   # after you create the file below
+
+# 4. Get the dataset (kept out of git; cite the author, see README)
+git clone https://github.com/eron93br/carOBD.git data/carOBD
+
+# 5. Keep the original script for reference
+cp /path/to/car_obd_autoencoder_fixed.py notebooks/00_original_idle_autoencoder.py
+
+# 6. First commit
+git add .
+git commit -m "Bootstrap repo layout and plan"
+```
+
+### 9.2 `.gitignore`
+
+```gitignore
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/carOBD/
+artifacts/*
+!artifacts/manifest.json
+*.tflite
+*.h5
+*.keras
+.DS_Store
+```
+
+### 9.3 `requirements-train.txt`
+
+```text
+numpy
+pandas
+scikit-learn
+tensorflow
+matplotlib
+pyyaml
+joblib
+pytest
+```
+
+### 9.4 `requirements-pi.txt`
+
+```text
+numpy
+pyyaml
+obd
+pyserial
+# Optional, only if a wheel exists for your Pi's OS/architecture:
+# ai-edge-litert
+```
+
+### 9.5 `configs/default.yaml`
+
+Values marked `# from original code` are copied from the uploaded script. Values marked `# proposal` are starting points to be tuned.
+
+```yaml
+data:
+  dataset_dir: data/carOBD/obdiidata
+  file_groups:
+    idle: "idle*.csv"
+    drive: "drive*.csv"
+    live: "live*.csv"
+    ufpe: "ufpe*.csv"
+    long: "long*.csv"
+  default_sample_period_s: 1.0        # from original code
+  drop_columns_prefix: "Unnamed"      # from original code
+
+modes:
+  context_window_s: 5.0               # from original code
+  persist_s: 2.0                      # from original code
+  startup_guard_s: 30.0               # from original code
+  engine_on_rpm: 100.0                # from original code
+  stopped_speed_kmh: 0.5              # from original code
+  accel_threshold_mps2: 0.15          # from original code
+  decel_threshold_mps2: -0.15         # from original code
+  warm_coolant_c: null                # set in Phase 1 from data
+  max_mode_changes_per_minute: null   # set in Phase 2
+
+windows:
+  idle_s: 30.0                        # from original code
+  accelerating_s: 10.0                # proposal
+  decelerating_s: 10.0                # proposal
+  cruising_s: 30.0                    # proposal
+  min_samples_per_window: 5           # proposal
+  drop_final_incomplete_window: true  # from original code
+
+features:
+  stats: [mean, std]                  # from original code
+  nuisance_sensors:                   # from original code
+    - FUEL_TANK
+    - TIME_SINCE_TROUBLE_CODES_CLEARED
+    - WARM_UPS_SINCE_CODES_CLEARED
+
+training:
+  seed: 42                            # from original code
+  split_unit: recording               # from original code (split by file)
+  min_windows_per_mode: 100           # proposal; below this the mode is UNCHECKED
+  autoencoder:
+    hidden: [24, 8, 24]               # from original code
+    activation: relu                  # from original code
+    optimizer: adam                   # from original code
+    loss: mse                         # from original code
+    batch_size: 32                    # from original code
+    max_epochs: 150                   # from original code
+    early_stopping_patience: 10       # from original code
+
+threshold:
+  method: percentile                  # from original code
+  false_positive_rate: 0.01           # from original code
+  min_calibration_windows: 30         # proposal
+
+alerts:
+  k: 2                                # proposal (k of n windows)
+  n: 3                                # proposal
+  report_unchecked: true
+
+runtime:
+  source: replay                      # replay | elm327
+  replay_file: data/carOBD/obdiidata/idle47.csv
+  elm327_port: /dev/rfcomm0           # proposal; depends on your adapter
+  poll_hz: 1.0                        # proposal; measure on the car
+  artifacts_dir: artifacts
+```
+
+---
+
+## 10. Risks and open questions
+
+**Open questions (need a team decision)**
+1. **Which Raspberry Pi model?** This sets the budget and whether LiteRT wheels are available.
+2. **Live OBD or replay only for the first release?** Live adds adapter, reconnect, and rate issues.
+3. **Same car only, or other vehicles?** Only one car (2014 Toyota Etios) is in the dataset.
+4. **Manual or automatic transmission?** Determines whether a gear-based sub-mode makes sense.
+5. **What counts as an anomaly we care about first?** (e.g., coolant, fuel trim, MAF). Drives the fault catalogue.
+
+**Risks**
+- *Sparse modes:* transient modes may have little data; mitigation is `UNCHECKED` plus coverage reporting.
+- *No real fault labels:* results depend on how realistic the injected faults are; state this limit in every report.
+- *Single vehicle, limited time span:* results may not transfer across seasons or cars.
+- *OBD polling rate is low and irregular:* windows and acceleration estimates may be coarse; measure early (Phase 1).
+- *Mode mistakes cascade:* a wrong mode means the wrong model scores the window; track mode-labeler accuracy separately.
+- *Advisory only:* this must not be presented as a safety system.
+
+---
+
+## 11. References
+
+- carOBD dataset (Toyota Etios 2014, 27 PIDs, file groups idle/drive/live/ufpe/long) — https://github.com/eron93br/carOBD — **the author asks that users cite the associated IEEE article** (linked from the repository); add the citation to `README.md`.
+- carOBD Raspberry Pi Zero W + ELM327 reader wiki — https://github.com/eron93br/carOBD/wiki
+- Modal emission analysis (idle / constant speed / acceleration / deceleration) — https://www.sciencedirect.com/science/article/abs/pii/004896979504646I
+- NCHRP Web-Only Document 122, modal emissions model (speed/acceleration matrix) — https://onlinepubs.trb.org/onlinepubs/nchrp/nchrp_w122.pdf
+- Driving cycles review (cruise defined near ±0.1 m/s²) — https://www.researchgate.net/publication/355926001_Driving_Cycles_for_Estimating_Vehicle_Emission_Levels_and_Energy_Consumption
+- Open-loop vs. closed-loop engine control modes — https://www.lxforums.com/threads/open-closed-loop-explained-service-manual.87624/
+- Context-aware anomaly detection from vehicle dynamics (OBD-II/CAN) — https://dl.acm.org/doi/fullHtml/10.1145/3678890.3678895
+- Rarity-aware contextual anomaly detection (frequency bias) — https://arxiv.org/pdf/2606.13311
+- Review of OBD-II based machine learning applications — https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12251678/
+- LiteRT (TensorFlow Lite successor) migration notes — https://developers.google.com/edge/litert/migration
+- LiteRT samples (Python on Raspberry Pi/Linux) — https://github.com/google-ai-edge/litert-samples

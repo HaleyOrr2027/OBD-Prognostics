@@ -1,8 +1,4 @@
-numpy
-pandas
-scipy
-scikit-learn
-joblib
-PyYAML
-matplotlib
-pytest
+pandas>=3.0.1
+numpy>=2.2.6
+scikit-learn>=1.9.1
+tensorflow>=2.21.0
