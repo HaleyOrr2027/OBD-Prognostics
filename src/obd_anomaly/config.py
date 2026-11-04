@@ -2,6 +2,8 @@
 # can use one shared set of settings.
 
 import os
+from pathlib import Path
+
 import yaml
 
 # Error for invalid configuration settings
@@ -115,6 +117,9 @@ def load_config(vehicle_override=None):
 
 class Config:
 
+    # Repo root as a Path, used by the training and scripts entry points.
+    root = Path(REPO_ROOT)
+
     def __init__(self, settings):
         self.settings = settings
 
@@ -136,3 +141,11 @@ class Config:
             value = value[key]
 
         return value
+
+    # Builds a path inside the repo, e.g. config.path("data", "raw").
+    def path(self, *parts):
+        return self.root.joinpath(*parts)
+
+    # Short label recorded with labeled data and evaluation results.
+    def version_tag(self):
+        return "pids-v" + str(self.pids.get("version")) + "_modes-v" + str(self.modes.get("version"))

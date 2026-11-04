@@ -8,13 +8,13 @@ The detector keeps each axis as its own column, so they are never collapsed into
 
 | Column | Values | Source |
 |---|---|---|
-| `ENGINE_STATE` | OFF, RUNNING, UNKNOWN | RPM ≥ `running_rpm_min` → RUNNING. A lost connection is UNKNOWN, never OFF. |
+| `ENGINE_STATE` | OFF, RUNNING, UNKNOWN | RPM ≥ `running_rpm_min` → RUNNING. A lost connection is UNKNOWN, never OFF. RPM below `running_rpm_min` while speed is above `conflict_speed_kmh` is UNKNOWN (RPM_SPEED_CONFLICT), not OFF. |
 | `THERMAL_STATE` | STARTUP_WARMUP, WARM_OR_UNKNOWN | First `startup_guard_sec` after an OFF→RUNNING transition. Coolant temperature is recorded but not used as a threshold. |
 | `MOTION_STATE_RAW` | see routing states below | Rule result for each sample before persistence |
 | `MOTION_STATE` | see routing states below | Stable state after persistence; this is what selects a model |
 | `LOAD_STATE` | LOW, MEDIUM, HIGH, UNKNOWN | ENGINE_LOAD bins; context only in v1 |
 | `MODE_CONFIDENCE` | 0–1 | 0 for unroutable states; reduced near a threshold or while a transition is pending |
-| `MODE_REASON` | `;`-separated flags | STARTUP_GUARD, ENGINE_OFF, BAD_QUALITY, ENGINE_UNKNOWN, NO_ACCELERATION_YET, NEAR_THRESHOLD, PENDING_TRANSITION |
+| `MODE_REASON` | `;`-separated flags | STARTUP_GUARD, ENGINE_OFF, BAD_QUALITY, ENGINE_UNKNOWN, RPM_SPEED_CONFLICT, IDLE_RPM_HIGH, NO_ACCELERATION_YET, NEAR_THRESHOLD, PENDING_TRANSITION |
 | `MODE_SEGMENT_ID` | `<session>-NNNN` | Increments on every stable-state change, time gap, or session boundary |
 
 ## Routing states (`MOTION_STATE`)
@@ -26,7 +26,7 @@ Rules are applied in priority order:
 | UNKNOWN_TRANSITION | bad data quality, unknown engine state, or no acceleration value yet | no |
 | ENGINE_OFF | engine OFF | no |
 | STARTUP_WARMUP | inside the startup guard | no (v1 abstains) |
-| IDLE | engine running, smoothed speed ≤ `stopped_speed_kmh`, RPM ≤ `idle_rpm_max` | yes |
+| IDLE | engine running, smoothed **and** raw speed ≤ `stopped_speed_kmh`; no RPM upper limit (`idle_rpm_max: null`), but RPM above `idle_rpm_flag_above` adds the reason IDLE_RPM_HIGH | yes |
 | ACCELERATING | moving, acceleration ≥ `accel_mps2` | yes |
 | CRUISING | moving, abs(acceleration) < `accel_mps2` | yes |
 | COASTING_DECEL | moving, acceleration ≤ `decel_mps2` | yes |
@@ -90,22 +90,58 @@ A hold time stops modes from flickering, but it also swallows the short, real sp
 
 | `dwell_sec` | IDLE | CRUISING | ACCELERATING | COASTING_DECEL | STRONG_DECEL | drive12 exact / ±2 s | drive3 exact / ±2 s |
 |---|---|---|---|---|---|---|---|
-| 0 (current) | 3891 (107) | 619 (78) | 1948 (82) | 1511 (81) | 0 (0) | 79.7% / 98.0% | 68.8% / 95.0% |
-| 1 | 3915 (109) | 4414 (82) | 3743 (82) | 2774 (82) | 20 (16) | 66.0% / 83.3% | 64.1% / 79.4% |
-| 2 | 3915 (109) | 5163 (82) | 3680 (82) | 2772 (82) | 20 (16) | 65.0% / 81.0% | 62.8% / 77.1% |
-| 3 | 4016 (110) | 6013 (82) | 4945 (82) | 3705 (82) | 34 (25) | 56.0% / 67.0% | 61.5% / 69.4% |
+| 0 (current) | 3897 (107) | 619 (78) | 1948 (82) | 1511 (81) | 0 (0) | 79.7% / 98.0% | 68.8% / 95.0% |
+| 1 | 3888 (108) | 4412 (82) | 3893 (82) | 2756 (82) | 20 (16) | 66.0% / 83.3% | 64.1% / 79.4% |
+| 2 | 3883 (108) | 5157 (82) | 3856 (82) | 2751 (82) | 20 (16) | 65.0% / 81.0% | 62.8% / 77.1% |
+| 3 | 3915 (108) | 6007 (82) | 5294 (82) | 3626 (82) | 34 (25) | 56.0% / 67.0% | 61.5% / 69.4% |
 
-Cells are accepted windows, with the number of independent sessions in brackets. Windows overlap, so the session count is the better measure of how much independent data there is. The dwell value was chosen on drive12 before any drive3 numbers existed; the drive3 column is shown for this decision only.
+Cells are accepted windows, with the number of independent sessions in brackets (regenerated Oct 21 with the signal cross-check rules). Windows overlap, so the session count is the better measure of how much independent data there is. The dwell value was chosen on drive12 before any drive3 numbers existed; the drive3 column is shown for this decision only.
 
 What the table shows:
 
 - **Every supported mode has data from 78–82 sessions at any hold time.** With event-sized windows, Step 30 does not force a hold time.
-- **A 1 s hold mainly helps CRUISING:** 619 → 4414 windows, while ACCELERATING and COASTING_DECEL roughly double. It costs 4.7 points of exact accuracy on drive3 and 15.6 points within ±2 s.
+- **A 1 s hold mainly helps CRUISING:** 619 → 4412 windows, while ACCELERATING and COASTING_DECEL roughly double. It costs 4.7 points of exact accuracy on drive3 and 15.6 points within ±2 s.
 - **Holds longer than 1 s add little data** and keep lowering accuracy.
 
-**Proposed:** keep `dwell_sec: 0` for v1. Revisit if the Step 36 session split leaves CRUISING calibration or test sets too thin (about 619 windows across 78 sessions), or once the Pi's own sampling rate is measured.
+**Agreed for now (Haley and Rijul, Oct 21):** keep `dwell_sec: 0`. Mode labels stay as accurate as possible, and the windowing step deals with short segments by rejecting windows that lack consistent data, rather than delaying mode changes to make segments longer. Losing some windows is preferred over windows that cross modes or are mislabeled. The trade-off between window count and accuracy will be looked at again before v1 is finalized.
 
 Threshold hysteresis (a lower exit threshold than entry) was also tried. It cut flicker from 12 to 10 changes per minute at a 1-point accuracy cost, so it was not adopted.
+
+## Signal cross-checks (Oct 21)
+
+Haley's concern: the signals that pick the mode can be the same signals a fault distorts. If an abnormal reading changes the mode, the window goes to the wrong anomaly model, or to none at all, so the fault ends up hiding itself. Motion is decided from speed and acceleration, and RPM is used only for engine state and idle, so RPM is where this risk sits. Two rules were changed:
+
+1. **IDLE has no RPM ceiling.** IDLE now means a stationary vehicle with its engine running. A stop at 3,000 RPM used to fall into UNKNOWN_TRANSITION, which produces no windows. Now it reaches the IDLE model, and that model decides whether the RPM is unusual. The reason flag IDLE_RPM_HIGH keeps these samples easy to find, since a driver revving the engine is not a fault.
+2. **RPM and speed must agree before the engine is called OFF.** If RPM reads off but speed says the vehicle is moving, the engine state is UNKNOWN with the reason RPM_SPEED_CONFLICT, and neither signal is trusted. This is also what a stall while rolling looks like, so the flag means "investigate", not "sensor broken". Only a real OFF resets the startup timer, so a brief conflict mid-drive does not trigger the 30 s startup guard again.
+
+Removing the RPM ceiling exposed a lag. Smoothed speed trails raw speed by about 1 s, so at a pull-away the RPM rise looked like a high-RPM idle. IDLE now also requires the latest raw speed reading to be stopped (`idle_requires_raw_stop`).
+
+All three rules can be switched off in `config/modes.yaml`. `python scripts/compare_mode_rules.py` runs the old and new rules on all 129 sessions:
+
+| Measure | Old rules | New rules |
+|---|---|---|
+| Samples whose label changed | — | 265 of 304,299 (0.09%) |
+| IDLE → UNKNOWN_TRANSITION | — | 219 samples, 62 sessions: pull-aways the old rule mislabeled as idle (raw speed already above 2 km/h) |
+| UNKNOWN_TRANSITION → IDLE | — | 46 samples, 15 sessions: stationary above 1,300 RPM |
+| RPM_SPEED_CONFLICT samples | — | 0. Healthy carOBD drives never show this conflict. |
+| UNKNOWN_TRANSITION share | 0.377% | 0.433% |
+| IDLE windows | 3,891 | 3,897 |
+| Other windows per mode | unchanged | unchanged |
+| drive12 exact / ±2 s | 79.7% / 98.0% | 79.7% / 98.0% |
+| drive3 exact / ±2 s | 68.8% / 95.0% | 68.8% / 95.0% |
+
+Unit tests (`tests/unit/test_signal_cross_checks.py`):
+
+- Stationary at 750, 1,300, 1,500 and 3,000 RPM is IDLE under the new rules, while the old rule dropped 1,500 and 3,000.
+- A vehicle moving with 100 RPM is a conflict.
+- A stall while rolling becomes ENGINE_OFF only once the vehicle stops.
+- An RPM glitch does not restart the startup guard.
+- A pull-away is not IDLE.
+
+Still open:
+
+- **UNKNOWN windows are still not scored.** A fault that causes a conflict is flagged but not evaluated. A fallback evaluation for UNKNOWN windows is a later step.
+- **Only RPM is cross-checked.** Speed itself has no independent check yet. Other pairs could catch plausible but inconsistent readings later, for example throttle against MAP or load, or speed against RPM and gear ratio.
 
 ## Known weakness
 

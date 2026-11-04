@@ -51,3 +51,12 @@ def test_missing_required_key():
             ["config_version"],
             "runtime.yaml"
         )
+
+# The training and scripts entry points use these helpers; keep them in sync
+# with the scripts (they broke once when config.py was replaced).
+def test_config_exposes_script_helpers():
+    from obd_anomaly.config import load_config as _load
+
+    config = _load()
+    assert config.path("data", "raw") == config.root / "data" / "raw"
+    assert config.version_tag().startswith("pids-v")

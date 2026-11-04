@@ -14,6 +14,9 @@ derived:
 
 engine_state:
   running_rpm_min: 300.0
+  # RPM says off while speed says moving -> engine UNKNOWN, reason RPM_SPEED_CONFLICT.
+  rpm_speed_conflict_check: true
+  conflict_speed_kmh: 5.0
 
 thermal_state:
   # Conservative time-based guard. Coolant is recorded as context only.
@@ -21,7 +24,14 @@ thermal_state:
 
 motion_state:
   stopped_speed_kmh: 2.0
-  idle_rpm_max: 1300.0
+  # null = no upper RPM limit on IDLE (old rule: 1300). See docs/mode_taxonomy.md.
+  idle_rpm_max: null
+  # Reason flag only; does not change the state.
+  idle_rpm_flag_above: 1300.0
+  # IDLE also needs the latest raw speed reading at or below stopped_speed_kmh.
+  # Smoothed speed lags ~1 s, and without this the RPM rise at a pull-away
+  # reads as a stationary high-RPM idle.
+  idle_requires_raw_stop: true
   accel_mps2: 0.15
   decel_mps2: -0.15
   strong_decel_mps2: -1.2
