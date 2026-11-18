@@ -3,3 +3,11 @@ version: 1
 obd: {}
 logging: {}
 reconnect: {}
+
+# Evidence-based candidate resting values for the carOBD dataset (drive3).
+# NOT universal thresholds; do not apply to other vehicle datasets.
+driver_request:
+  carobd_pedal_baselines:
+    ACCELERATOR_PEDAL_POSITION_D: 16.078432
+    ACCELERATOR_PEDAL_POSITION_E: 31.764706
+  carobd_rest_tolerance_percent: 0.8

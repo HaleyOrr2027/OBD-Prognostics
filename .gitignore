@@ -3,6 +3,7 @@ docs/site/
 logs/
 .vscode/
 .idea/
+data/
 .venv/
 __pycache__/
 .pytest_cache/
