@@ -89,11 +89,14 @@ def delayed_pairs(frame: pd.DataFrame, delay: float) -> pd.DataFrame:
 def save_heatmap(data: pd.DataFrame, delay: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     counts = pd.crosstab(data["DRIVER_REQUEST"], data["FUTURE_MODE"])
     counts = counts.reindex(index=REQUEST_ORDER, columns=MODE_ORDER, fill_value=0)
-    row_totals = counts.sum(axis=1).replace(0, pd.NA)
-    percent = counts.div(row_totals, axis=0).fillna(0) * 100.0
+    # Keep this numeric. Using pd.NA here can promote the DataFrame to object
+    # dtype, which matplotlib cannot render with imshow.
+    counts = counts.astype(float)
+    row_totals = counts.sum(axis=1).replace(0.0, float("nan"))
+    percent = (counts.div(row_totals, axis=0).fillna(0.0) * 100.0).astype(float)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    image = ax.imshow(percent.to_numpy(), aspect="auto", vmin=0, vmax=100)
+    image = ax.imshow(percent.to_numpy(dtype=float), aspect="auto", vmin=0, vmax=100)
     ax.set_xticks(range(len(MODE_ORDER)), MODE_ORDER, rotation=35, ha="right")
     ax.set_yticks(range(len(REQUEST_ORDER)), REQUEST_ORDER)
     ax.set_xlabel(f"Detected vehicle mode about {delay:g} s later")
