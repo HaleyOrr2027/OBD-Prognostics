@@ -62,21 +62,22 @@ def load_session(session: str) -> pd.DataFrame:
     return frame[["SESSION_ID", "ELAPSED_SEC", "DRIVER_REQUEST", "MOTION_STATE"]]
 
 
-def delayed_pairs(frame: pd.DataFrame, delay: float) -> pd.DataFrame:
-    """Match each request sample to the first real mode sample at/after t+delay.
+def delayed_pairs(events: pd.DataFrame, full_data: pd.DataFrame, delay: float) -> pd.DataFrame:
+    """Match request-change events to the first real mode sample at/after t+delay.
 
-    This avoids the old narrow-tolerance behavior that dropped most short-delay
-    samples. ACTUAL_DELAY_SEC is recorded so we can audit how close the match is
-    to the requested delay.
+    The request side is event-only, but the vehicle-mode side must use ALL
+    timestamps. Using event-only rows on both sides skips valid mode samples and
+    artificially inflates the measured response delay.
     """
     chunks = []
-    for session, session_frame in frame.groupby("SESSION_ID", sort=False):
-        session_frame = session_frame.sort_values("ELAPSED_SEC").reset_index(drop=True)
+    for session, event_frame in events.groupby("SESSION_ID", sort=False):
+        event_frame = event_frame.sort_values("ELAPSED_SEC").reset_index(drop=True)
+        mode_frame = full_data[full_data["SESSION_ID"] == session].sort_values("ELAPSED_SEC")
 
-        left = session_frame[["SESSION_ID", "ELAPSED_SEC", "DRIVER_REQUEST"]].copy()
+        left = event_frame[["SESSION_ID", "ELAPSED_SEC", "DRIVER_REQUEST"]].copy()
         left["TARGET_SEC"] = left["ELAPSED_SEC"] + delay
 
-        right = session_frame[["ELAPSED_SEC", "MOTION_STATE"]].copy()
+        right = mode_frame[["ELAPSED_SEC", "MOTION_STATE"]].copy()
         right = right.rename(columns={"ELAPSED_SEC": "MODE_SEC", "MOTION_STATE": "FUTURE_MODE"})
 
         matched = pd.merge_asof(
@@ -164,7 +165,7 @@ def main() -> None:
 
     rows = []
     for delay in DELAYS:
-        pairs = delayed_pairs(events, delay)
+        pairs = delayed_pairs(events, data, delay)
         _, percent = save_heatmap(pairs, delay)
         row = {
             "delay_sec": delay,
