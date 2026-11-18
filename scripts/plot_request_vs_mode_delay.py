@@ -63,27 +63,49 @@ def load_session(session: str) -> pd.DataFrame:
 
 
 def delayed_pairs(frame: pd.DataFrame, delay: float) -> pd.DataFrame:
-    left = frame[["SESSION_ID", "ELAPSED_SEC", "DRIVER_REQUEST"]].copy()
-    left["TARGET_SEC"] = left["ELAPSED_SEC"] + delay
+    """Match each request sample to the first real mode sample at/after t+delay.
 
-    right = frame[["SESSION_ID", "ELAPSED_SEC", "MOTION_STATE"]].copy()
-    right = right.rename(columns={"ELAPSED_SEC": "MODE_SEC", "MOTION_STATE": "FUTURE_MODE"})
-
+    This avoids the old narrow-tolerance behavior that dropped most short-delay
+    samples. ACTUAL_DELAY_SEC is recorded so we can audit how close the match is
+    to the requested delay.
+    """
     chunks = []
-    for session, left_s in left.groupby("SESSION_ID", sort=False):
-        right_s = right[right["SESSION_ID"] == session].sort_values("MODE_SEC")
+    for session, session_frame in frame.groupby("SESSION_ID", sort=False):
+        session_frame = session_frame.sort_values("ELAPSED_SEC").reset_index(drop=True)
+
+        left = session_frame[["SESSION_ID", "ELAPSED_SEC", "DRIVER_REQUEST"]].copy()
+        left["TARGET_SEC"] = left["ELAPSED_SEC"] + delay
+
+        right = session_frame[["ELAPSED_SEC", "MOTION_STATE"]].copy()
+        right = right.rename(columns={"ELAPSED_SEC": "MODE_SEC", "MOTION_STATE": "FUTURE_MODE"})
+
         matched = pd.merge_asof(
-            left_s.sort_values("TARGET_SEC"),
-            right_s,
+            left.sort_values("TARGET_SEC"),
+            right.sort_values("MODE_SEC"),
             left_on="TARGET_SEC",
             right_on="MODE_SEC",
-            direction="nearest",
-            tolerance=max(0.35, delay * 0.35),
+            direction="forward",
         )
+        matched["ACTUAL_DELAY_SEC"] = matched["MODE_SEC"] - matched["ELAPSED_SEC"]
         chunks.append(matched)
 
     out = pd.concat(chunks, ignore_index=True)
     return out.dropna(subset=["FUTURE_MODE"])
+
+
+def request_events(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep the first timestamp when a request state changes.
+
+    ACCELERATE_REQUEST and RELEASE_ACCELERATOR are transient change events, so
+    counting repeated rows can blur the relationship with the later vehicle
+    response. Event-only analysis gives each request change one vote.
+    """
+    chunks = []
+    for session, session_frame in frame.groupby("SESSION_ID", sort=False):
+        session_frame = session_frame.sort_values("ELAPSED_SEC").copy()
+        changed = session_frame["DRIVER_REQUEST"].ne(session_frame["DRIVER_REQUEST"].shift())
+        chunks.append(session_frame.loc[changed])
+    return pd.concat(chunks, ignore_index=True)
 
 
 def save_heatmap(data: pd.DataFrame, delay: float) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -138,18 +160,24 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     frames = [load_session(s) for s in args.sessions]
     data = pd.concat(frames, ignore_index=True)
+    events = request_events(data)
 
     rows = []
     for delay in DELAYS:
-        pairs = delayed_pairs(data, delay)
+        pairs = delayed_pairs(events, delay)
         _, percent = save_heatmap(pairs, delay)
-        row = {"delay_sec": delay, "matched_timestamps": len(pairs), **metric(percent)}
+        row = {
+            "delay_sec": delay,
+            "matched_request_events": len(pairs),
+            "median_actual_delay_sec": float(pairs["ACTUAL_DELAY_SEC"].median()) if len(pairs) else float("nan"),
+            **metric(percent),
+        }
         rows.append(row)
 
     summary = pd.DataFrame(rows)
     summary.to_csv(OUT / "request_vs_mode_delay_summary.csv", index=False, float_format="%.2f")
 
-    print("\nDelay comparison (not accuracy):")
+    print("\nDelay comparison using request-change events (not accuracy):")
     print(summary.round(1).to_string(index=False))
     print(f"\nWrote delayed heatmaps and summary to {OUT}")
 
